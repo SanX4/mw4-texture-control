@@ -1,0 +1,43 @@
+# Deny everything by default: the folder this repository lives in may be a game install (binaries, tens of GiB of mirrored or cached game data, logs, local
+# settings). Only the tooling and the documentation are tracked; nothing from the game or the CDN is ever committed.
+/*
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/README.md
+!/DISCLAIMER.md
+!/LICENSE
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/docs/
+/docs/*
+!/docs/USAGE.md
+!/docs/FINDINGS.md
+!/docs/ARCHITECTURE.md
+!/docs/TEXTURE-PACK.md
+!/docs/GETTING-STARTED.md
+!/docs/images/
+!/docs/ingame/
+!/packaging/
+/packaging/out/
+/packaging/out-notes.md
+!/docs/ISSUE-ipv6-cdn-lookup.md
+!/tools/
+/tools/*
+!/tools/*.py
+!/tools/*.bat
+# local working scripts that are not part of the release
+/tools/memdiff.py
+/tools/ccsdec.py
+/tools/ccsdds.py
+/tools/ccsview.py
+/tools/ccsfetch.py
+/tools/kapi_an.py
+/tools/strxref.py
+/tools/mkcache.py
+/tools/e2_keytest.py
+!/tools/ccslib/
+!/tools/tests/
+__pycache__/
+*.pyc

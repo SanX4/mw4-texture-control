@@ -1,0 +1,19 @@
+MW4 TEXTURE CONTROL
+
+1. Close the game and open MW4 Texture Control.exe.
+2. Read the notice and select your game folder.
+3. Choose streaming while you play or download an offline copy.
+4. Complete game setup if prompted.
+5. Press Turn on HD textures, then launch the game.
+6. Keep the app running. Close the game and turn the session off when finished.
+
+OFFLINE COPY
+Open Settings > Offline copy, select a storage folder and texture level, and
+start the download. Pause and resume as needed. Start a session before play.
+
+HELP
+Read docs/GETTING-STARTED.md and docs/USAGE.md.
+Run Restore hosts.bat if a session was interrupted.
+
+Downloads and support: https://github.com/SanX4/mw4-texture-control
+Reference: https://github.com/voidfnc/mw4-texture-streaming-research
