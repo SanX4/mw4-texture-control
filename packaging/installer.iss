@@ -90,9 +90,9 @@ begin
   Result := True;
   if not Prep('status', Status) then Exit;
   if Status = 0 then Exit;
-  if MsgBox('MW4 Texture Control is active (a session is running, or its hosts-file entry is on).' + #13#10#13#10 +
+  if SuppressibleMsgBox('MW4 Texture Control is active (a session is running, or its hosts-file entry is on).' + #13#10#13#10 +
             'To ' + Doing + ' safely, setup will stop it and put your hosts file back. Windows may ask for permission.' + #13#10#13#10 + 'Continue?',
-            mbConfirmation, MB_YESNO) <> IDYES then
+            mbConfirmation, MB_YESNO, IDYES) <> IDYES then
   begin
     Result := False;
     Exit;
@@ -101,9 +101,9 @@ begin
   if (Status and 1) <> 0 then
   begin
     if (not Prep('remove-hosts', Done)) or (Done <> 0) then
-      Result := MsgBox('The hosts file could not be put back (permission was declined, or the file is protected).' + #13#10#13#10 +
+      Result := SuppressibleMsgBox('The hosts file could not be put back (permission was declined, or the file is protected).' + #13#10#13#10 +
                        'Without that, the game may keep being sent to a program that is no longer running. You can fix it later with "Restore hosts" in the Start menu.' + #13#10#13#10 +
-                       'Continue anyway?', mbError, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+                       'Continue anyway?', mbError, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
   end;
 end;
 
