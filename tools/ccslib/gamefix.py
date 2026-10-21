@@ -281,7 +281,7 @@ def run_elevating(cmd, root=None, say=print):
         rf = os.path.join(paths.RUN, 'gamefix-result.json'); paths.ensure_dirs()
         if os.path.exists(rf): os.remove(rf)
         say('game setup: the game folder needs administrator rights, asking Windows for permission')
-        argv = launch.argv_for('gamefix', cmd, '--root', layout(root)['root'], '--result-file', rf); code = procs.run_elevated(argv)
+        argv = launch.argv_for('gamefix', cmd, '--root', layout(root)['root'], '--result-file', rf, *paths.helper_context_args()); code = procs.run_elevated(argv)
         if code is None: return False, 'permission was declined: nothing was changed'
         try:
             with open(rf, encoding='utf-8') as f: res = json.load(f)
@@ -309,7 +309,8 @@ def _message(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='gamefix', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('cmd', choices=('status', 'apply', 'undo')); ap.add_argument('--root'); ap.add_argument('--json', action='store_true'); ap.add_argument('--result-file')
-    a = ap.parse_args(argv); res = dict(cmd=a.cmd, ok=True, message='')
+    paths.add_context_arguments(ap)
+    a = ap.parse_args(argv); paths.apply_helper_context(a); res = dict(cmd=a.cmd, ok=True, message='')
     try:
         if a.cmd == 'status': s = status(a.root); res.update(status=s, message=describe(s), ok=s['ok'] or not s['applicable'])
         elif a.cmd == 'apply': r = apply(a.root); res.update(message=_message(r), done=r['done'], aside=r['aside'], ok=True)

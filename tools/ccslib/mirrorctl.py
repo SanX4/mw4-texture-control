@@ -32,6 +32,7 @@ def pack_kwargs(cfg):
 
 def start(**kw):
     if procs.status('mirror')['alive']: return procs.status('mirror')
+    if os.path.exists(os.path.join(paths.RUN, 'transfers-paused.json')): raise RuntimeError('Disk protection paused downloads. Free cache space before resuming.')
     try: os.remove(stopfile())
     except OSError: pass
     return procs.start('mirror', run_argv(**kw), OUTFILE)

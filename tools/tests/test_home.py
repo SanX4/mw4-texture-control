@@ -88,15 +88,19 @@ class HomeViewTests(unittest.TestCase):
         r = s['ready']; self.assertEqual(r['primary'], ('turn_on', 'Turn on HD textures', 'power')); self.assertEqual(r['ring']['kind'], 'off'); self.assertEqual([c['title'] for c in r['cards']], ['Game folder', 'Textures load', 'Free space'])
         self.assertEqual(r['cards'][0]['value'], 'D:\\Games\\Modern Warfare 4'); self.assertEqual(r['cards'][2]['value'], '200 GiB on D:'); self.assertEqual(r['footer'], ('ok', 'Everything checks out'))
         self.assertTrue(s['ready busy']['busy']); st = s['starting']; self.assertEqual((st['ring']['kind'], st['busy']), ('work', True)); self.assertEqual(st['primary'][1], 'Turning on...')
-        w = s['waiting']; self.assertEqual((w['ring']['kind'], w['waiting']), ('on', True)); self.assertEqual(w['secondary'], [('turn_off', 'Turn off')]); self.assertIsNone(w['primary'])
-        p = s['playing']; self.assertEqual((p['ring']['kind'], p['ring']['big'], p['ring']['small']), ('full', '4,212', 'textures delivered')); self.assertEqual(p['secondary'], [('turn_off', 'Turn off when you are done')])
-        self.assertEqual([(k['title'], k['value']) for k in p['kpis']], [('Speed', '7.6'), ('Failed', '0'), ('Loaded from', 'The internet')]); self.assertEqual(p['spark'], [1, 2, 3]); self.assertIn('17:42', p['sub'])
-        self.assertEqual(s['game closed']['headline'], 'Game closed'); self.assertEqual(s['game closed']['secondary'], [('turn_off', 'Turn off')])
-        fi = s['finished']; self.assertEqual(fi['primary'][:2], ('done', 'Done')); self.assertEqual([a for a, _ in fi['secondary']], ['open_report', 'abtest']); self.assertIn('4,543 textures in about 44 min and every one was delivered', fi['sub'])
+        w = s['waiting']; self.assertEqual((w['ring']['kind'], w['waiting']), ('on', True)); self.assertEqual(w['secondary'], [('turn_off', 'Stop streaming')]); self.assertIsNone(w['primary'])
+        p = s['playing']; self.assertEqual((p['ring']['kind'], p['ring']['big'], p['ring']['small']), ('full', '4,212', 'requests')); self.assertEqual(p['secondary'], [('turn_off', 'Stop streaming')])
+        self.assertEqual([(k['title'], k['value']) for k in p['kpis']], [('Internet', '4,198'), ('Local copy', '0'), ('Failed', '0')]); self.assertEqual(p['spark'], [1, 2, 3]); self.assertIn('17:42', p['sub'])
+        self.assertEqual(s['game closed']['headline'], 'Game closed'); self.assertEqual(s['game closed']['secondary'], [('turn_off', 'Stop streaming')])
+        fi = s['finished']; self.assertEqual(fi['primary'][:2], ('done', 'Done')); self.assertEqual([a for a, _ in fi['secondary']], ['open_report', 'abtest']); self.assertIn('4,543 textures in about 44 min. 0 failures recorded; delivery counts are unavailable', fi['sub'])
 
     def test_the_source_of_the_textures_is_shown_plainly(self):
-        k = lambda mir, ok: home.build(state(ms=['session', 'game']), facts(game_running=True, requests=5, stat=dict(req=5, mirror=mir, ok=ok, err=0, retry=0), **LIVE))['kpis'][2]['value']
-        self.assertEqual((k(0, 5), k(5, 5), k(2, 5)), ('The internet', 'Your offline copy', 'Offline copy and internet'))
+        for mirror, total in ((0,5),(5,5),(2,5)):
+            view=home.build(state(ms=['session','game']),facts(game_running=True,requests=5,stat=dict(req=5,mirror=mirror,ok=total,err=0,retry=0),**LIVE))
+            values={k['title']:k['value'] for k in view['kpis']}
+            self.assertEqual((values['Internet'],values['Local copy'],values['Failed']),(str(total-mirror),str(mirror),'0'))
+            self.assertEqual(view['headline'],'Texture streaming active')
+
 
     def test_problems_say_what_happened_and_offer_a_fix_or_nothing_to_press(self):
         s = scenarios()
@@ -136,7 +140,7 @@ class HomeViewTests(unittest.TestCase):
         self.assertEqual(home.fmt_dur(0), '0:00'); self.assertEqual(home.fmt_dur(1062), '17:42'); self.assertEqual(home.fmt_dur(3725), '1:02:05'); self.assertEqual(home.fmt_dur(None), '0:00')
         self.assertEqual(home.short_path(r'D:\Games\Modern Warfare 4'), 'D:\\Games\\Modern Warfare 4'); self.assertEqual(home.short_path(r'C:\Program Files (x86)\Steam\steamapps\common\Modern Warfare 4'), 'C:\\...\\common\\Modern Warfare 4')
         self.assertEqual(home.short_path(''), '.')
-        t = home.summary_text; self.assertIn('every one was delivered', t(dict(req=10, err=0, secs=30))); self.assertNotIn('in about', t(dict(req=10, err=0, secs=30))); self.assertIn('3 requests failed', t(dict(req=10, err=3, secs=120)))
+        t = home.summary_text; self.assertIn('delivery counts are unavailable', t(dict(req=10, err=0, secs=30))); self.assertNotIn('in about', t(dict(req=10, err=0, secs=30))); self.assertIn('3 failures', t(dict(req=10, err=3, secs=120)))
         self.assertIn("Nothing reached", t(dict(req=0, err=0, secs=1))); self.assertEqual(t({}), 'The session is over.')
 
     def test_a_bad_state_still_gives_a_view(self):
@@ -155,11 +159,11 @@ class HomeViewTests(unittest.TestCase):
         self.assertEqual((r['How textures load']['action'], r['Offline copy']['action'], r['Advanced mode']['action'], r['One-time game setup']['action']), ('switch_path', 'open_download', 'open_advanced', ''))
         n = rows(guide.new_state(path='offline'), facts(game_setup='needed'), dict(motion=True, pack='41% downloaded')); self.assertEqual((n['How textures load']['value'], n['Offline copy']['value'], n['One-time game setup']['action'], n['Reduce motion']['value']), ('From my offline copy', '41% downloaded', 'game_setup', 'On'))
         self.assertEqual(rows(state(), facts(), dict(system_motion=True))['Reduce motion'], dict(icon='refresh', label='Reduce motion', value='On (Windows setting)', action='', tone=''))
-        self.assertEqual([s['title'] for s in home.build(state(), facts())['settings']], ['Textures', 'Game', 'Help', 'Look and feel', 'Advanced'])
+        self.assertEqual([s['title'] for s in home.build(state(), facts())['settings']], ['Textures', 'Game', 'Session and downloads', 'Help', 'Look and feel', 'Advanced'])
 
     def test_hover_help_covers_the_ring_cards_and_numbers(self):
         h = home.help_for(scenarios()['ready']); self.assertIn('Press the button', h['ring']); self.assertEqual(len(h['cards']), 3); self.assertTrue(all(h['cards'])); self.assertIn('turn_on', h['buttons'])
-        p = home.help_for(scenarios()['playing']); self.assertEqual(sorted(p['kpis']), ['Failed', 'Loaded from', 'Speed']); self.assertTrue(all(p['kpis'].values()))
+        p = home.help_for(scenarios()['playing']); self.assertEqual(sorted(p['kpis']), ['Failed', 'Internet', 'Local copy', 'Speed']); self.assertTrue(all(p['kpis'].values()))
         for kind in ('off', 'work', 'on', 'full', 'warn', 'ok'): self.assertTrue(home.HELP['ring'][kind], kind)
         for text in [h['ring'], h['footer'], h['steps']] + list(h['buttons'].values()) + h['cards'] + list(p['kpis'].values()): self.assertIsNone(BANNED.search(text), text); self.assertIsNone(JARGON.search(text), text)
 

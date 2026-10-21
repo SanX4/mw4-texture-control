@@ -136,6 +136,14 @@ class GuiTests(unittest.TestCase):
         finally: a4.stop_poll.set(); a4.destroy()
         a2 = a3 = a4 = None; gc.collect()
 
+    def test_offline_storage_can_be_chosen_without_admin(self):
+        from unittest import mock
+        selected=tempfile.mkdtemp(prefix='offline-choice-',dir=TMP)
+        with mock.patch.object(procs,'status',return_value=dict(alive=False)),mock.patch.object(filedialog,'askdirectory',return_value=selected):
+            self.app.choose_mirror_folder()
+        self.assertEqual(paths.MIRROR,os.path.abspath(selected))
+        self.assertEqual(config.load()['paths']['mirror_dir'],os.path.abspath(selected))
+
     def test_all_tabs_exist(self):
         self.assertEqual(list(self.app.tabs), ['Dashboard', 'Proxy', 'Texture pack', 'Mirror', 'Cache', 'Game', 'Doctor', 'Report', 'Hosts / DNS', 'Logs', 'Settings'])
 
@@ -612,7 +620,7 @@ class GuiTests(unittest.TestCase):
         app = self.app; self._freeze(); g = self.game_dir(); app._apply_game_folder(g); app.guide_do('choose_quick'); text = lambda: (app.home_view['mode'], app.home_page.h1.cget('text'))
         self._snap(); app._home_tick(); self.assertEqual(text(), ('ready', 'Ready when you are')); self.assertEqual(app.home_page.btn_primary.text, 'Turn on HD textures')
         app._starting = True; app._home_tick(); self.assertEqual(app.home_view['mode'], 'starting'); app._starting = False
-        self._snap(**self._live()); app._home_tick(); self.assertEqual(text(), ('waiting', 'HD textures are on')); self.assertEqual(app._guide_state()['ms'], ['session'])
+        self._snap(**self._live()); app._home_tick(); self.assertEqual(text(), ('waiting', 'Texture streaming active')); self.assertEqual(app._guide_state()['ms'], ['session'])
         self._snap(**self._live(req=120, game=['sp26-cod.exe'])); app._home_tick(); self.assertEqual(text(), ('playing', 'Texture streaming is active')); self.assertEqual(app.home_view['ring']['big'], '120')
         self._snap(); app._home_tick(); self.assertEqual(text(), ('finished', 'All done. Nice session.')); self.assertIn('120 textures', app.home_page.sub.cget('text'))
         app.home_do('done'); app.say('Session NOT ready: hosts override not applied:   permission denied', 'ERR'); app._home_tick(); self.assertEqual(text(), ('problem', 'Windows blocked the change'))
@@ -638,7 +646,7 @@ class GuiTests(unittest.TestCase):
     def test_the_whole_window_uses_the_one_palette(self):
         from ccslib import ui
         self.assertEqual((ccsgui.BG, ccsgui.PANEL, ccsgui.FG, ccsgui.ACC), (ui.BG, ui.CARD, ui.TEXT, ui.ACCENT)); self.assertEqual(str(ttk_style(self.app).lookup('TFrame', 'background')), ui.BG)
-        self.assertEqual(str(ttk_style(self.app).lookup('Accent.TButton', 'background')), ui.ACCENT); self.assertEqual(self.app.nb.cget('style'), 'Plain.TNotebook')
+        self.assertEqual(str(ttk_style(self.app).lookup('Accent.TButton', 'background')), ui.BG); self.assertEqual(self.app.nb.cget('style'), 'Plain.TNotebook')
 
 
     # ---------------------------------------------------------------- the settings drawer, the offline-copy page, hover help, Advanced mode help
@@ -695,7 +703,7 @@ class GuiTests(unittest.TestCase):
     def test_hover_help_is_attached_to_the_ring_the_steps_the_footer_and_the_cards(self):
         app = self._ready_home(); app.update(); tips = app.home_page.tips
         for key in ('ring', 'stepper', 'footer', 'card0', 'card1', 'card2', 'primary'): self.assertIn(key, tips, key); self.assertTrue(tips[key].text, key)
-        self.assertIn('Press the button', tips['ring'].text); self._snap(**self._live(req=50, game=['sp26-cod.exe'])); app._home_tick(); self.assertIn('delivered', tips['ring'].text); self.assertIn('kpi-Speed', tips)
+        self.assertIn('Press the button', tips['ring'].text); self._snap(**self._live(req=50, game=['sp26-cod.exe'])); app._home_tick(); self.assertIn('delivered', tips['ring'].text); self.assertIn('kpi-Internet', tips);self.assertIn('kpi-Local copy',tips)
 
     def test_advanced_pages_have_a_title_and_one_line_of_help_and_wrap_to_the_window(self):
         app = self.app; app.show_page('advanced'); app.update()

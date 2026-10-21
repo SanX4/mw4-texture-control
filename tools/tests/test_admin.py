@@ -15,36 +15,21 @@ def read(*p):
 
 
 class WhenToElevate(unittest.TestCase):
-    def test_the_rules(self):
-        w = lambda argv=(), admin=False, env=None: ccsgui.wants_elevation(list(argv), admin=admin, env=env or {})
-        self.assertTrue(w())
-        self.assertFalse(w(admin=True), 'already elevated')
-        self.assertFalse(w(env={'CCS_NO_ELEVATE': '1'}), 'opted out'); self.assertFalse(w(['--no-elevate']), 'opted out')
-        self.assertFalse(w([ccsgui.ELEVATED_ONCE]), 'the relaunched copy never asks again')
-        self.assertFalse(w(['--selftest']), 'the headless self-test never prompts')
-        self.assertTrue(w(['--tab', 'Doctor']))
+    def test_the_window_never_requires_elevation(self):
+        for argv in ([],['--tab','Doctor'],['--selftest']):
+            self.assertFalse(ccsgui.wants_elevation(argv,admin=False,env={}))
 
-    def test_main_hands_over_to_an_elevated_copy_and_keeps_the_arguments(self):
-        with mock.patch.object(procs, 'is_admin', return_value=False), mock.patch.object(procs, 'relaunch_elevated', return_value=True) as rl, \
-                mock.patch.object(ccsgui, 'App') as app, mock.patch.object(os, 'environ', {}):
-            self.assertEqual(ccsgui.main(['--tab', 'Doctor']), 0)
-        argv = rl.call_args[0][0]; self.assertEqual(argv[-3:], ['--tab', 'Doctor', ccsgui.ELEVATED_ONCE]); self.assertEqual(argv[:-3], launch.gui_argv()); app.assert_not_called()
-
-    def test_main_carries_on_unelevated_when_the_prompt_is_declined(self):
-        with mock.patch.object(procs, 'is_admin', return_value=False), mock.patch.object(procs, 'relaunch_elevated', return_value=False), mock.patch.object(ccsgui, 'App') as app, \
-                mock.patch.object(ccsgui, 'single_instance', return_value=True), mock.patch.object(ccsgui, 'hold_mutex'), mock.patch.object(os, 'environ', {}):
-            self.assertEqual(ccsgui.main([]), 0); app.assert_called_once()
-
-    def test_an_elevated_start_does_not_relaunch(self):
-        with mock.patch.object(procs, 'is_admin', return_value=True), mock.patch.object(procs, 'relaunch_elevated') as rl, mock.patch.object(ccsgui, 'App'), \
-                mock.patch.object(ccsgui, 'single_instance', return_value=True), mock.patch.object(ccsgui, 'hold_mutex'):
-            ccsgui.main([]); rl.assert_not_called()
+    def test_main_starts_normally_without_requesting_admin(self):
+        with mock.patch.object(procs,'relaunch_elevated') as run, mock.patch.object(ccsgui,'App') as app, \
+             mock.patch.object(ccsgui,'single_instance',return_value=True),mock.patch.object(ccsgui,'hold_mutex'):
+            self.assertEqual(ccsgui.main([]),0)
+        run.assert_not_called();app.assert_called_once()
 
 
 class Packaging(unittest.TestCase):
     def test_only_the_window_asks_for_administrator_rights(self):
         spec = read('packaging', 'ccs.spec'); gui = next(l for l in spec.splitlines() if l.startswith('gui = EXE(')); cli = next(l for l in spec.splitlines() if l.startswith('cli = EXE('))
-        self.assertIn('uac_admin=True', gui); self.assertNotIn('uac_admin', cli, 'the installer calls ccs-cli.exe as the current user: it must not need elevation')
+        self.assertIn('uac_admin=False', gui); self.assertNotIn('uac_admin', cli, 'the installer calls ccs-cli.exe as the current user: it must not need elevation')
 
     def test_setup_starts_the_program_through_shellexec_so_the_elevation_prompt_can_appear(self):
         line = next(l for l in read('packaging', 'installer.iss').splitlines() if l.startswith('Filename: "{app}\\{#AppExe}"') and 'postinstall' in l)
@@ -83,7 +68,7 @@ class HelpersStartedByAnElevatedWindow(unittest.TestCase):
         with mock.patch.object(uninstall, 'helper_names', return_value=['proxy']), mock.patch.object(procs, 'stop', return_value=False), mock.patch.object(procs, 'status', side_effect=status), \
                 mock.patch.object(procs, 'is_admin', return_value=False), mock.patch.object(procs, 'run_elevated', side_effect=elevated):
             code, out = self.prep('stop-helpers')
-        self.assertEqual(code, 0); self.assertEqual(self.seen[-2:], ['uninstall-prep', 'stop-helpers']); self.assertNotIn('still running', out)
+        self.assertEqual(code, 0); self.assertIn('stop-helpers', self.seen); self.assertIn('--work-dir',self.seen);self.assertIn('--hosts-file',self.seen); self.assertNotIn('still running', out)
 
     def test_declined_permission_and_a_survivor_are_reported_with_exit_codes(self):
         with mock.patch.object(uninstall, 'helper_names', return_value=['proxy']), mock.patch.object(procs, 'stop', return_value=False), mock.patch.object(procs, 'status', return_value=dict(alive=True)), \

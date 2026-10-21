@@ -12,7 +12,7 @@ MIRROR_LOG = os.path.join(paths.WORK, 'ccsmirror.log')
 def proxy_argv(cfg):
     p = config.effective_proxy(cfg)
     a = launch.argv_for('ccsproxy') + ['--max-raw-mib', str(p['max_raw_mib']), '--budget-gib', str(p['budget_gib']),
-         '--retries', str(p['retries']), '--port', str(p['port']), '--log', PROXY_LOG, '--stats-json', PROXY_STATS]
+         '--retries', str(p['retries']), '--port', str(p['port']), '--log', PROXY_LOG, '--stats-json', PROXY_STATS, '--pause-file', os.path.join(paths.RUN, 'transfers-paused.json')]
     if p['origin']: a += ['--origin', paths.MIRROR]
     if p['offline']: a += ['--offline']
     if p['upstream_ip']: a += ['--upstream-ip', p['upstream_ip']]
@@ -22,7 +22,7 @@ def proxy_argv(cfg):
 def guard_argv(cfg):
     g = config.effective(cfg)['guard']
     return launch.argv_for('diskguard') + ['--limit-gib', str(g['limit_gib']), '--action', g['action'],
-            '--interval', str(g['interval']), '--cache', paths.XPAK_CACHE, '--status-json', GUARD_STATS, '--log', GUARD_LOG]
+            '--min-free-gib', str(g.get('min_free_gib',2)), '--interval', str(g['interval']), '--cache', paths.XPAK_CACHE, '--status-json', GUARD_STATS, '--log', GUARD_LOG, '--pause-file', os.path.join(paths.RUN, 'transfers-paused.json'), '--mirror-stop-file', os.path.join(paths.MIRROR, 'STOP')]
 
 
 def start_proxy(cfg):

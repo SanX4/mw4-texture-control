@@ -27,11 +27,12 @@ ROOT = paths.GAME_ROOT
 LOG = os.path.join(paths.WORK, 'ccsproxy.log')
 HOST = 'cod-assets.cdn.callofduty.com'
 PAT = re.compile(r'^/pc/iw9_3/23/([0-9a-f]{2})/([0-9a-f]{16})_([0-9a-f]{8})_([01])$')
-lock = threading.Lock(); stat = dict(req=0, ok=0, skip=0, miss=0, err=0, retry=0, cliabort=0, mirror=0, bytes=0, mbytes=0)
+lock = threading.Lock(); stat = dict(req=0, ok=0, skip=0, miss=0, err=0, retry=0, cliabort=0, mirror=0, bytes=0, mbytes=0, internet=0, local=0)
 RAW = {}
 SKIPS = collections.Counter()      # tier-withheld ids -> how often the engine asked again (does a 404 cause a retry storm?)
 # observability for the GUI (ccsgui.py): per-tier request histogram + last requests, exposed via GET /__ccs/stats and --stats-json
 TIERS = [('<=64K', 2**16), ('<=256K', 2**18), ('<=1M', 2**20), ('<=4M', 2**22), ('<=8M', 2**23), ('<=16M', 2**24), ('>16M', None)]
+CONNECTION = dict(active_cdn='', fallback=False, last_success=None, last_failure=None)
 HIST = {t[0]: 0 for t in TIERS}; RECENT = collections.deque(maxlen=50); SVC = collections.deque(maxlen=2000); T0 = time.time(); ARGS = {}
 def tier_of(raw):
     if raw is None: return 'unknown'
@@ -39,6 +40,7 @@ def tier_of(raw):
         if lim is None or raw <= lim: return n
 def record(path, cid, raw, source, status, nbytes, ms=None):
     with lock:
+        if source in ('mirror', 'upstream') and status in (200, 206) and nbytes > 0: CONNECTION['last_success'] = dict(ts=time.time(), source=source, status=status)
         t = tier_of(raw)
         if ms is not None: SVC.append(ms)
         if t in HIST: HIST[t] += 1
@@ -53,7 +55,7 @@ def skip_summary():
 
 def snapshot():
     with lock:
-        return dict(pid=os.getpid(), skips=skip_summary(), started=T0, now=time.time(), stat=dict(stat), hist=dict(HIST), recent=list(RECENT), svc_ms=svc_summary(), args=ARGS, mirror_ids=len(MKEY), index_ids=len(RAW))
+        return dict(pid=os.getpid(), skips=skip_summary(), started=T0, now=time.time(), stat=dict(stat), hist=dict(HIST), recent=list(RECENT), svc_ms=svc_summary(), args=ARGS, connection=dict(CONNECTION), paused=bool(ARGS.get('pause_file') and os.path.exists(ARGS['pause_file'])), mirror_ids=len(MKEY), index_ids=len(RAW))
 def write_stats(path):
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f: json.dump(snapshot(), f)
@@ -84,6 +86,24 @@ def load_index():
             RAW[r['id']] = r['raw']
     log(f"index: {len(RAW)} chunk ids")
 
+def byte_range(value, size):
+    """Single RFC byte range. None means ignore the header; False is unsatisfiable."""
+    if not value: return None
+    match = re.fullmatch(r'bytes=(\d*)-(\d*)', value.strip())
+    if not match or not any(match.groups()): return None
+    left, right = match.groups()
+    if not left:
+        suffix = int(right)
+        return (max(0, size-suffix), size-1) if suffix > 0 and size else False
+    start = int(left); end = int(right) if right else size-1
+    if right and end < start: return None
+    return (start, min(end, size-1)) if start < size else False
+
+
+def failure(reason):
+    with lock: CONNECTION['last_failure'] = dict(ts=time.time(), reason=str(reason))
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *a): pass
@@ -106,35 +126,62 @@ class H(BaseHTTPRequestHandler):
             if raw is not None and raw > a.max_raw_mib * 2**20:
                 with lock: stat['skip'] += 1; SKIPS[cid] += 1
                 record(path, cid, raw, 'skip', 404, 0, ms=self.ms()); log(f"SKIP-TIER {self.command} {path} raw={raw/2**20:.1f}MiB"); return self.reply(404)
-        if m and a.origin and not self.headers.get('Range'):
-            # offline origin: serve the verbatim CDN object (+ stored ETag / x-amz-meta-cod-key) from the local mirror
+        if m and getattr(a, 'pause_file', None) and os.path.exists(a.pause_file) and self.command == 'GET':
+            failure('Disk protection paused new transfers. Free cache space to resume.')
+            record(path, cid, raw, 'disk-paused', 503, 0, ms=self.ms())
+            return self.reply(503, extra=[('Retry-After', '5')])
+        if m and a.origin:
             cid = int(m.group(2), 16); wire = int(m.group(3), 16)
             p = os.path.join(a.origin, 'objects', m.group(1), f'{cid:016x}_{wire:08x}_{m.group(4)}')
+            et, ck = MKEY.get(cid, (None, None)); extra = [('Accept-Ranges', 'bytes')]
+            if et: extra.append(('ETag', f'"{et}"'))
+            if ck: extra.append(('x-amz-meta-cod-key', ck))
+            ranged = None
+            if self.command == 'GET':
+                validator = self.headers.get('If-Range')
+                if not validator or (et and validator == f'"{et}"'):
+                    ranged = byte_range(self.headers.get('Range'), wire)
+            found = False
             try:
-                if os.path.getsize(p) == wire:
-                    body = open(p, 'rb').read() if self.command == 'GET' else b''
-                    et, ck = MKEY.get(cid, (None, None)); extra = [('Accept-Ranges', 'bytes')]
-                    if et: extra.append(('ETag', f'"{et}"'))
-                    if ck: extra.append(('x-amz-meta-cod-key', ck))
-                    if self.command == 'HEAD': self.send_response(200); self.send_header('Content-Length', str(wire)); [self.send_header(k, v) for k, v in extra]; self.end_headers()
-                    else: self.reply(200, body, 'application/octet-stream', extra)
-                    with lock: stat['mirror'] += 1; stat['ok'] += 1; stat['mbytes'] += wire if self.command == 'GET' else 0
-                    record(path, cid, RAW.get(cid), 'mirror', 200, wire, ms=self.ms())
-                    return log(f"{self.command} {path} -> 200 {wire}B MIRROR")
-            except OSError:
-                pass            # not in the mirror -> fall through to the upstream
-            except Exception as e:
-                with lock: stat['cliabort'] += 1
-                return log(f"CLIENT-ABORT {path}: {e}")
+                with open(p, 'rb') as f:
+                    if os.fstat(f.fileno()).st_size == wire:
+                        found = True
+                        if ranged is False: body = b''; length = 0; status = 416; extra.append(('Content-Range', f'bytes */{wire}'))
+                        else:
+                            start, end = ranged if ranged is not None else (0, wire-1)
+                            length = max(0, end-start+1); status = 206 if ranged is not None else 200
+                            if ranged is not None: extra.append(('Content-Range', f'bytes {start}-{end}/{wire}'))
+                            f.seek(start); body = f.read(length) if self.command == 'GET' else b''
+                            if self.command == 'GET' and len(body) != length: found = False
+            except OSError: found = False
+            if found:
+                try:
+                    self.send_response(status); self.send_header('Content-Length', str(length)); self.send_header('Content-Type', 'application/octet-stream')
+                    for key, value in extra: self.send_header(key, value)
+                    self.end_headers()
+                    if self.command == 'GET': self.wfile.write(body)
+                except (OSError, ConnectionError) as e:
+                    with lock: stat['cliabort'] += 1
+                    self.close_connection = True; log(f'CLIENT-ABORT {path}: {e}'); return
+                delivered = len(body) if self.command == 'GET' else 0
+                with lock:
+                    if status in (200, 206):
+                        stat['mirror'] += 1; stat['ok'] += 1; stat['mbytes'] += delivered
+                        if self.command == 'GET': stat['local'] += 1
+                    else: stat['miss'] += 1
+                record(path, cid, raw, 'mirror', status, delivered, ms=self.ms())
+                log(f'{self.command} {path} -> {status} {delivered}B MIRROR'); return
         if m:
             if stat['bytes'] > a.budget_gib * 2**30:
                 record(path, cid, raw, 'budget', 503, 0, ms=self.ms()); log(f"BUDGET exhausted {stat['bytes']/2**30:.2f} GiB"); return self.reply(503)
             if getattr(a, 'offline', False):      # mirror-only test mode: a mirror gap must show up as a 404, never as a silent upstream fetch
                 with lock: stat['miss'] += 1
+                failure('This texture is missing from the offline copy. Resume the offline download or use streaming.')
                 record(path, cid, raw, 'offline-miss', 404, 0, ms=self.ms()); log(f"MISS-OFFLINE {self.command} {path} raw={raw}"); return self.reply(404)
             note = f"raw={raw}"
         # chunk objects: the URL carries the wire size, so a full (non-Range) body must match it exactly
         want = int(m.group(3), 16) if m and not self.headers.get('Range') and self.command == 'GET' else None
+        if getattr(a, 'offline',False): return self.reply(404)
         hdr = upstream.headers({'Connection': 'close'})
         if self.headers.get('Range'): hdr['Range'] = self.headers['Range']
         r = body = last = None
@@ -153,6 +200,7 @@ class H(BaseHTTPRequestHandler):
         if r is None:
             with lock: stat['err'] += 1
             if m: record(path, int(m.group(2), 16), RAW.get(int(m.group(2), 16)), 'err', 502, 0, ms=self.ms())
+            failure(last)
             log(f"ERR-UPSTREAM {path}: {last} (gave up after {a.retries + 1} tries)")
             try: self.reply(502)
             except Exception: pass
@@ -172,8 +220,11 @@ class H(BaseHTTPRequestHandler):
             return
         with lock:
             stat['bytes'] += len(body) if self.command == 'GET' else 0
-            if r.status in (200, 206): stat['ok'] += 1
+            if r.status in (200, 206):
+                stat['ok'] += 1
+                if self.command == 'GET': stat['internet'] += 1
             else: stat['miss'] += 1
+        if r.status not in (200, 206): failure(f'CDN returned HTTP {r.status}')
         if m: record(path, int(m.group(2), 16), RAW.get(int(m.group(2), 16)), 'upstream', r.status, len(body), ms=self.ms())
         log(f"{self.command} {path} -> {r.status} {len(body)}B {note} range={self.headers.get('Range','-')} total={stat['bytes']/2**30:.3f}GiB")
 
@@ -193,12 +244,14 @@ if __name__ == '__main__':
     ap.add_argument('--offline', action='store_true', help='mirror-only: chunks missing from --origin get 404 instead of an upstream fetch')
     ap.add_argument('--port', type=int, default=80, help='listen port on ::1 and 127.0.0.1 (80 for the game; other values for tests)')
     ap.add_argument('--log', help='log file (default tools/work/ccsproxy.log)')
+    ap.add_argument('--pause-file', help='disk protection signal: pause new chunk transfers while present')
     ap.add_argument('--stats-json', help='write a stats snapshot here every 2 s (atomic); also served at GET /__ccs/stats')
     a = ap.parse_args()
     if a.log: LOG = os.path.abspath(a.log)
     os.makedirs(os.path.dirname(LOG), exist_ok=True); ARGS = {k: v for k, v in vars(a).items()}
     log(f"START {time.strftime('%Y-%m-%d')} pid={os.getpid()} args={' '.join(sys.argv[1:])}")   # run boundary + date for ccsreport
-    if not a.upstream_ip: a.upstream_ip = upstream.resolve(check=False)      # public-resolver lookup (the hosts override points the name at us)
+    if not a.upstream_ip: a.upstream_ip = '' if a.offline else upstream.resolve(check=False)      # public-resolver lookup (the hosts override points the name at us)
+    ARGS = dict(vars(a)); CONNECTION.update(active_cdn=a.upstream_ip, fallback=upstream.is_fallback(a.upstream_ip))
     if a.origin: a.origin = os.path.abspath(a.origin); load_mirror(a.origin)
     load_index(); log(f"upstream {a.upstream_ip}  tier<={a.max_raw_mib}MiB  budget={a.budget_gib}GiB")
     for cls, addr in ((S6, ('::1', a.port)), (S4, ('127.0.0.1', a.port))):

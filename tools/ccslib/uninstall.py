@@ -26,14 +26,14 @@ def state():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='uninstall-prep', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=('status', 'stop-helpers', 'remove-hosts')); ap.add_argument('--json', action='store_true'); a = ap.parse_args(argv)
+    ap.add_argument('cmd', choices=('status', 'stop-helpers', 'remove-hosts')); ap.add_argument('--json', action='store_true'); paths.add_context_arguments(ap); a = ap.parse_args(argv); paths.apply_helper_context(a)
     if a.cmd == 'status':
         s = state(); code = (HOSTS_PRESENT if s['hosts_present'] else 0) | (HELPERS_RUNNING if s['helpers_running'] else 0)
         print(json.dumps(s) if a.json else f"hosts: {s['hosts_state']}; helpers running: {', '.join(s['helpers_running']) or 'none'}; data: {s['data_dir']}"); return code
     if a.cmd == 'stop-helpers':
         stopped = [n for n in helper_names() if procs.stop(n)]; left = [n for n in helper_names() if procs.status(n)['alive']]
         if left and not procs.is_admin():                                                       # helpers started by the (elevated) window can only be ended by an elevated process
-            if procs.run_elevated(launch.argv_for('uninstall-prep', 'stop-helpers')) is None: print('stopped: ' + (', '.join(stopped) or 'nothing') + '; permission to stop ' + ', '.join(left) + ' was declined'); return 3
+            if procs.run_elevated(launch.argv_for('uninstall-prep', 'stop-helpers', *paths.helper_context_args())) is None: print('stopped: ' + (', '.join(stopped) or 'nothing') + '; permission to stop ' + ', '.join(left) + ' was declined'); return 3
             left = [n for n in helper_names() if procs.status(n)['alive']]
         print('stopped: ' + (', '.join(stopped) or 'nothing') + ('; still running: ' + ', '.join(left) if left else '')); return 1 if left else 0
     from . import session                                             # remove-hosts

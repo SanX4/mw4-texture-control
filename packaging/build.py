@@ -102,14 +102,12 @@ def smoke(app, v):
         p.terminate(); p.wait(15)
     c, out, err = call('--selftest', t=90); line = out.strip().splitlines()[-1] if out.strip() else ''
     check(c == 0 and line.startswith('{') and 'hosts' in json.loads(line), 'the control window builds and polls (--selftest)')
-    check(b'requireAdministrator' in open(gui, 'rb').read() and b'requireAdministrator' not in open(cli, 'rb').read(), 'the window asks for administrator rights (manifest); ccs-cli.exe does not')
-    if not ctypes.windll.shell32.IsUserAnAdmin(): print('  skip starting the windowed program: it needs administrator rights and this build was started without them (the manifest check above covers it)')
-    else:
-        g = subprocess.Popen([gui], env=env, cwd=tmp)
-        try:
-            time.sleep(6); check(g.poll() is None, 'the windowed program stays open'); check(os.path.isdir(os.path.join(tmp, 'work')), 'it created its data folder')
-        finally:
-            subprocess.run(['taskkill', '/PID', str(g.pid), '/T', '/F'], capture_output=True); time.sleep(1)
+    check(b'requireAdministrator' not in open(gui, 'rb').read() and b'requireAdministrator' not in open(cli, 'rb').read(), 'both programs run normally; only explicit helper operations request elevation')
+    g = subprocess.Popen([gui], env=env, cwd=tmp)
+    try:
+        time.sleep(6); check(g.poll() is None, 'the windowed program stays open'); check(os.path.isdir(os.path.join(tmp, 'work')), 'it created its data folder')
+    finally:
+        subprocess.run(['taskkill', '/PID', str(g.pid), '/T', '/F'], capture_output=True); time.sleep(1)
     shutil.rmtree(tmp, ignore_errors=True)
 
 

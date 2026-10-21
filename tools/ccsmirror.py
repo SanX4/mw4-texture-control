@@ -205,7 +205,7 @@ def cmd_run(a):
     log(f'run: upstream={ip} workers={a.workers} scope={sc or "index"} tier<={tier:g}MiB budget={budget:.1f}GiB{" (auto)" if budget != a.budget_gib else ""} min-free={a.min_free_gib}GiB'
         f'{f" limit={a.limit_mbps:g}Mbps" if a.limit_mbps else ""}{f" daily={a.daily_gib:g}GiB" if a.daily_gib else ""}')
     log(f'queue: {len(rows)} chunks, {qgib:.2f} GiB wire')
-    q = list(reversed(rows)); stat = dict(ok=0, fail=0, bytes=0, retry=0, throttled=0); stop = threading.Event(); rate = Rate(a.max_rps)
+    q = list(reversed(rows)); stat = dict(ok=0, fail=0, bytes=0, retry=0, throttled=0, last_success=None, last_failure=None); stop = threading.Event(); rate = Rate(a.max_rps)
     lim = Limiter(a.limit_mbps * 1e6 / 8, stop) if a.limit_mbps and a.limit_mbps > 0 else None
     quota = Quota(int(a.daily_gib * 2**30), c) if a.daily_gib and a.daily_gib > 0 else None
     t0 = time.time(); dbl = threading.Lock(); total_q = len(q); linklock = threading.Lock(); link = dict(down_since=None); final = dict(state=None)
@@ -248,7 +248,7 @@ def cmd_run(a):
             tmp = a.progress_json + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(dict(state=st, pid=os.getpid(), started=t0, now=time.time(), queued=total_q, left=len(q), ok=stat['ok'], fail=stat['fail'], retry=stat['retry'], throttled=stat['throttled'],
-                               bytes=stat['bytes'], mibps=stat['bytes'] / el / 2**20, mibps_now=now_rate() / 2**20, edge=edge['ip'], edge_note=edge['note'], free_gib=free(), budget_gib=budget, workers=a.workers, scope=sc, tier_mib=tier,
+                               bytes=stat['bytes'], last_success=stat['last_success'], last_failure=stat['last_failure'], fallback=upstream.is_fallback(edge['ip']), mibps=stat['bytes'] / el / 2**20, mibps_now=now_rate() / 2**20, edge=edge['ip'], edge_note=edge['note'], free_gib=free(), budget_gib=budget, workers=a.workers, scope=sc, tier_mib=tier,
                                limit_mbps=a.limit_mbps or 0, daily_gib=a.daily_gib or 0, used_today_gib=(quota.used / 2**30) if quota else None,
                                resume_at=quota.resume_at() if quota and quota.exceeded() else None), f)
             os.replace(tmp, a.progress_json)
@@ -264,7 +264,7 @@ def cmd_run(a):
             sid, wire, raw, flag, prio = item
             i = sid & (2**64 - 1); p = opath(i, wire, flag); os.makedirs(os.path.dirname(p), exist_ok=True)
             path = f'/pc/iw9_3/23/{i & 0xff:02x}/{i:016x}_{wire:08x}_{flag}'
-            good = None; netfail = False; att = 0; throttles = 0
+            good = None; netfail = False; att = 0; throttles = 0; last_error='Download failed'
             while att < a.retries + 1:
                 att += 1
                 try:
@@ -296,7 +296,7 @@ def cmd_run(a):
                     if throttles > 30: log(f'FAIL {path}: throttled 30 times in a row'); break
                     continue
                 except Exception as e:
-                    netfail = not isinstance(e, BadObject)
+                    last_error=str(e); netfail = not isinstance(e, BadObject)
                     with lock: stat['retry'] += 1
                     try: conn.close()
                     except Exception: pass
@@ -311,11 +311,11 @@ def cmd_run(a):
                 with open(tmp, 'wb') as f: f.write(good[3])
                 os.replace(tmp, p)
                 with dbl: c.execute('update chunks set status=1, etag=?, cod_key=?, ts=? where id=?', (good[1], good[2], time.time(), sid))
-                with lock: stat['ok'] += 1; stat['bytes'] += wire
+                with lock: stat['ok'] += 1; stat['bytes'] += wire; stat['last_success'] = time.time()
                 if quota: quota.add(wire)
             else:
                 with dbl: c.execute('update chunks set status=? where id=?', (3 if good else 2, sid))   # 3 = 404, 2 = failed
-                with lock: stat['fail'] += 1
+                with lock: stat['fail'] += 1; stat['last_failure'] = dict(ts=time.time(), reason='CDN returned HTTP 404' if good else last_error)
     def watchdog():
         """Far below the user's line speed for a minute (and not because of a cap, a quota, a link loss or a 429): measure the edges again, switch if one is clearly better."""
         now = time.time()

@@ -9,7 +9,7 @@ from tkinter import font as tkfont
 
 # ------------------------------------------------------------------------------------------------ tokens
 BG, BG2, CARD, CARD2, LINE, LINE2 = '#f5f5f7', '#eaecef', '#ffffff', '#eceef2', '#dce0e5', '#c9cfd7'
-TEXT, DIM, FAINT = '#1d1d1f', '#585e68', '#69717d'
+TEXT, DIM, FAINT = '#1d1d1f', '#505762', '#59616d'
 ACCENT, ACCENT2 = '#0069df', '#0069df'
 OK, WARN, BAD = '#187849', '#986300', '#c33036'
 ON_ACCENT = '#ffffff'                      # text on the bright gradient buttons
@@ -64,10 +64,15 @@ def family(root):
 
 def font(root, px, kind='text', bold=False):
     """A Tk font tuple of `px` design pixels (negative size = pixels in Tk, so it follows S())."""
+    px = int(round(px * getattr(root._root(), '_text_scale', 1.0)))
     f = family(root)
     if kind == 'head': return (f['head'], -S(px), 'bold' if bold else 'normal') if f['head'] != 'Segoe UI Semibold' else (f['head'], -S(px))
     if bold: return (f['semi'], -S(px)) if f['semi'] != f['text'] else (f['text'], -S(px), 'bold')
     return (f['text'], -S(px))
+
+
+def mono(root, px):
+    return ('Consolas', -S(round(px*getattr(root._root(),'_text_scale',1.0))))
 
 
 # ------------------------------------------------------------------------------------------------ PNG + image cache
@@ -507,7 +512,9 @@ class Ring(tk.Canvas):
         if icon_name:
             self._ic = self.create_image(cx, cy - (S(10) if small else 0), image=icon(self, icon_name, 60 if not small else 54, fg, 2.0))
         if big:
-            self._texts.append(self.create_text(cx, cy - (S(8) if small else 0), text=big, fill=TEXT, font=font(self, 42, 'head', True)))
+            size=42
+            while size>12 and tkfont.Font(self,font=font(self,size,'head',True)).measure(big)>self.d-S(20):size-=1
+            self._texts.append(self.create_text(cx, cy - (S(8) if small else 0), text=big, fill=TEXT, font=font(self,size,'head',True)))
         if small:
             self._texts.append(self.create_text(cx, cy + (S(30) if big else S(34)), text=small, fill=fg if not big else DIM, font=font(self, 13 if big else 12, bold=not big)))
         if kind == 'on': self._pulse(True)
@@ -676,6 +683,7 @@ class Scroll(tk.Frame):
         if w < 2: return
         content_width=max(w,self.body.winfo_reqwidth())
         self.cv.itemconfigure(self._win, width=content_width, height=max(h, self.body.winfo_reqheight())); self.cv.configure(scrollregion=(0, 0, content_width, max(h, self.body.winfo_reqheight())))
+        self._bind_focus(self.body)
 
     def _set_x(self,a,b):
         if float(a)<=0 and float(b)>=1: self.xsb.pack_forget()
@@ -697,3 +705,22 @@ class Scroll(tk.Frame):
     def _wheel(self, e):
         if getattr(e.widget, 'winfo_class', lambda: '')() in self.SELF_SCROLLING: return
         if self.sb.winfo_ismapped(): self.cv.yview_scroll(-1 if e.delta > 0 else 1, 'units')
+
+
+    def _bind_focus(self, widget):
+        if not getattr(widget,'_scroll_focus_bound',False):
+            widget._scroll_focus_bound=True
+            widget.bind('<FocusIn>',lambda e,w=widget:self.reveal(w),add='+')
+        for child in widget.winfo_children(): self._bind_focus(child)
+
+    def reveal(self, widget):
+        """Keep keyboard focus visible in both dimensions."""
+        if not self.winfo_ismapped(): return
+        self.update_idletasks()
+        top=widget.winfo_rooty()-self.body.winfo_rooty();left=widget.winfo_rootx()-self.body.winfo_rootx()
+        total_h=max(1,self.body.winfo_height());total_w=max(1,self.body.winfo_width())
+        current_y=self.cv.canvasy(0);current_x=self.cv.canvasx(0)
+        if top < current_y: self.cv.yview_moveto(max(0,top-8)/total_h)
+        elif top+widget.winfo_height()>current_y+self.cv.winfo_height(): self.cv.yview_moveto(max(0,top+widget.winfo_height()-self.cv.winfo_height()+8)/total_h)
+        if left < current_x:self.cv.xview_moveto(max(0,left-8)/total_w)
+        elif left+widget.winfo_width()>current_x+self.cv.winfo_width():self.cv.xview_moveto(max(0,left+widget.winfo_width()-self.cv.winfo_width()+8)/total_w)

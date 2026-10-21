@@ -8,7 +8,7 @@ from ccslib import home, homeui, ui
 
 class ControlInteractionTests(unittest.TestCase):
     def setUp(self):
-        self.root=tk.Tk(); self.root.geometry('1100x780+20+20')
+        self.root=tk.Tk();self.callback_errors=[];self.root.report_callback_exception=lambda kind,value,tb:self.callback_errors.append(str(value)); self.root.geometry('1100x780+20+20')
         self.ticker=ui.Ticker(self.root); self.actions=[]
         self.page=homeui.HomePage(self.root,self.ticker,self.actions.append); self.page.pack(fill='both',expand=True)
         self.view=home.build(test_home.state(),test_home.facts())
@@ -16,7 +16,7 @@ class ControlInteractionTests(unittest.TestCase):
 
     def tearDown(self):
         self.ticker.set_enabled(False)
-        self.root.destroy(); self.page=None; self.root=None; gc.collect()
+        self.root.destroy(); self.page=None; self.root=None; gc.collect();self.assertEqual(self.callback_errors,[])
 
     def pump(self,seconds):
         end=time.perf_counter()+seconds
@@ -43,6 +43,25 @@ class ControlInteractionTests(unittest.TestCase):
         drawer.show(self.view['settings']); self.root.update()
         self.assertEqual(drawer._offset,0); self.assertNotIn('drawer',self.ticker.jobs)
         drawer.hide(); self.root.update(); self.assertFalse(drawer.winfo_ismapped())
+
+    def test_settings_keyboard_focus_stays_inside_and_scrolls(self):
+        self.ticker.set_enabled(False)
+        drawer=self.page.drawer;drawer.show(self.view['settings']);self.root.update()
+        self.assertTrue(drawer._focusables)
+        last=drawer._focusables[-1];last.focus_force();self.root.update()
+        drawer.scroll.reveal(last);self.root.update()
+        self.assertGreater(drawer.scroll.cv.yview()[0],0)
+        self.assertEqual(drawer._focus_next(1),'break');self.root.update()
+        self.assertIs(self.root.focus_get(),drawer._focusables[0])
+        drawer.hide();self.root.update()
+        self.assertIs(self.root.focus_get(),self.page.btn_settings)
+
+    def test_larger_text_is_used_by_new_controls(self):
+        from tkinter import font as tkfont
+        normal=abs(tkfont.Font(self.root,font=ui.font(self.root,14)).actual()['size'])
+        self.root._text_scale=1.3
+        larger=abs(tkfont.Font(self.root,font=ui.font(self.root,14)).actual()['size'])
+        self.assertGreater(larger,normal)
 
     def test_sidebar_supports_keyboard_and_preserves_download_selection(self):
         nav=self.page.rail_items['open_download']

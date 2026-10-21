@@ -19,16 +19,17 @@ from ccslib import hosts, launch, procs, paths
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='ccshosts', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=('status', 'diff', 'apply', 'remove', 'verify', 'flush', 'backups', 'restore-backup'))
+    ap.add_argument('cmd', choices=('status', 'diff', 'apply', 'remove', 'verify', 'flush', 'backups', 'restore-backup', 'rollback'))
     ap.add_argument('arg', nargs='?')
     ap.add_argument('--json', action='store_true'); ap.add_argument('--force', action='store_true'); ap.add_argument('--no-flush', action='store_true')
     ap.add_argument('--elevate', action='store_true'); ap.add_argument('--result-file')
-    a = ap.parse_args(argv)
-    writes = a.cmd in ('apply', 'remove', 'flush', 'restore-backup')
+    ap.add_argument('--expected-sha256'); paths.add_context_arguments(ap)
+    a = ap.parse_args(argv); paths.apply_helper_context(a)
+    writes = a.cmd in ('apply', 'remove', 'flush', 'restore-backup', 'rollback')
     if writes and a.elevate and not procs.is_admin() and not os.environ.get('CCS_HOSTS_PATH'):
         rf = a.result_file or os.path.join(paths.RUN, 'hosts-result.json'); paths.ensure_dirs()
         if os.path.exists(rf): os.remove(rf)
-        sub = launch.argv_for('ccshosts', a.cmd) + ([a.arg] if a.arg else []) + (['--force'] if a.force else []) + (['--no-flush'] if a.no_flush else []) + ['--result-file', rf]
+        sub = launch.argv_for('ccshosts', a.cmd) + ([a.arg] if a.arg else []) + (['--force'] if a.force else []) + (['--no-flush'] if a.no_flush else []) + ['--result-file', rf] + paths.helper_context_args() + (['--expected-sha256', a.expected_sha256] if a.expected_sha256 else [])
         code = procs.run_elevated(sub)
         if code is None: print('UAC declined'); return 3
         try: print(open(rf, encoding='utf-8').read())
@@ -41,6 +42,7 @@ def main(argv=None):
             t, _ = hosts.read(); res['diff'] = hosts.diff(t, hosts.compute(t, a.arg or 'apply', a.force))
         elif a.cmd == 'apply': res.update(hosts.apply(force=a.force, flush=not a.no_flush))
         elif a.cmd == 'remove': res.update(hosts.remove(flush=not a.no_flush))
+        elif a.cmd == 'rollback': res.update(hosts.rollback_attempt(a.arg, a.expected_sha256, flush=not a.no_flush))
         elif a.cmd == 'verify': res.update(hosts.resolve_check())
         elif a.cmd == 'flush': res['flushed'] = hosts.flush_dns()
         elif a.cmd == 'backups': res['backups'] = hosts.list_backups()

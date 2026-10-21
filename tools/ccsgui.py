@@ -3,18 +3,16 @@
 
   python tools/ccsgui.py            (or tools/ccs-gui.bat)         --selftest builds the window headless-ish, polls once and exits
 
-Runs as administrator by default (the packaged program asks for it in its manifest; from source it relaunches itself elevated once, see wants_elevation). Elevated, nothing
-else asks for permission: the hosts file, the game folder and a mirror inside Program Files are all writable. If the prompt is declined it carries on unelevated, as before:
-then hosts-file changes go through tools/ccshosts.py with a UAC prompt each time. CCS_NO_ELEVATE=1 or --no-elevate stays unelevated on purpose.
+The window runs normally. Explicit hosts changes and protected game-folder setup use small elevated helpers.
 Children (proxy, diskguard) are detached processes tracked by pid files, so closing/restarting the GUI does not lose them.
 See docs/USAGE.md.
 """
 import collections, ctypes, json, os, queue, re, subprocess, sys, threading, time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font as tkfont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ccslib import cachectl, config, doctor, gamefix, guide, home, homeui, hosts, launch, logtail, mirrorctl, mirrordb, pack, paths, procs, proxyctl, report, session, ui, version
+from ccslib import cachectl, config, connection, doctor, gamefix, guide, home, homeui, hosts, launch, logtail, mirrorctl, mirrordb, pack, paths, procs, proxyctl, report, session, ui, version
 
 BG, PANEL, FG, DIM, ACC = ui.BG, ui.CARD, ui.TEXT, ui.DIM, ui.ACCENT                        # one palette for the whole window (ui.py)
 OK, WARN, BAD, OFF = ui.OK, ui.WARN, ui.BAD, ui.FAINT
@@ -38,7 +36,7 @@ class Tip:
         try:
             self.win = tk.Toplevel(self.w); self.win.wm_overrideredirect(True)
             self.win.wm_geometry(f'+{self.w.winfo_rootx() + 12}+{self.w.winfo_rooty() + self.w.winfo_height() + 6}')
-            tk.Label(self.win, text=self.text, justify='left', wraplength=self.wrap, bg=PANEL, fg=FG, relief='solid', borderwidth=1, padx=8, pady=6, font=('Segoe UI', 9)).pack()
+            tk.Label(self.win, text=self.text, justify='left', wraplength=self.wrap, bg=PANEL, fg=FG, relief='solid', borderwidth=1, padx=8, pady=6, font=ui.font(self.win,13)).pack()
         except tk.TclError: self.win = None
 
     def _hide(self, _e=None):
@@ -57,7 +55,7 @@ class App(tk.Tk):
         super().__init__()
         paths.ensure_dirs()
         self._set_icon(); self.title(f'MW4 Texture Control {version.__version__}'); ui.init(self); sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.geometry(f'{min(ui.S(1320), max(ui.S(1040), sw - 60))}x{min(ui.S(840), max(ui.S(720), sh - 100))}'); self.minsize(min(ui.S(980), sw - 40), min(ui.S(640), sh - 80)); self.configure(bg=BG); self.ticker = ui.Ticker(self)           # the window fits small screens too
-        self.cfg = config.load(); self.snap = {}; self.q = queue.Queue(); self.busy = False
+        self.cfg = config.load(); self._text_scale = self.cfg['ui'].get('text_scale', 1.0); self.snap = {}; self.q = queue.Queue(); self.busy = False
         self.rate = collections.deque(maxlen=12); self.series = collections.deque(maxlen=180); self._game_prev = False; self._guide_game_seen = False; self._guide_last = None; self._gfc = None; self._guide_sig = None; self._guide_lbl = {}; self._guide_peak = None; self._spot_key = None; self.game_start = None; self.tails = {n: logtail.Tail(p, 150) for n, p in LOG_SOURCES}
         self.log_lines = collections.deque(maxlen=6000); self.gui_log_path = dict(LOG_SOURCES)['gui']
         self.page = 'home'; self.home_view = None; self._pack_err = None; self._notice_pending = (not selftest) and self.cfg.get('notice_ack') != version.__version__; self._found = None; self._searching = False; self._pick = None; self._starting = False; self._starting_at = 0; self.nav_items = {}
@@ -90,7 +88,7 @@ class App(tk.Tk):
     # ---------------------------------------------------------------- theme / widgets
     def _style(self):
         s = ttk.Style(self); s.theme_use('clam'); fam = ui.family(self)['text']; LN, F2, HOV = ui.LINE, ui.CARD2, '#e1e7ef'
-        s.configure('.', background=BG, foreground=FG, fieldbackground=F2, bordercolor=LN, lightcolor=PANEL, darkcolor=PANEL, troughcolor=PANEL, font=(fam, 11), focuscolor=ACC)
+        s.configure('.', background=BG, foreground=FG, fieldbackground=F2, bordercolor=LN, lightcolor=PANEL, darkcolor=PANEL, troughcolor=PANEL, font=ui.font(self,15), focuscolor=ACC)
         s.configure('TNotebook', background=BG, borderwidth=0); s.configure('TNotebook.Tab', background=PANEL, foreground=DIM, padding=(ui.S(14), ui.S(6)))
         s.map('TNotebook.Tab', background=[('selected', BG)], foreground=[('selected', FG)])
         s.layout('Plain.TNotebook.Tab', []); s.configure('Plain.TNotebook', background=BG, borderwidth=0, tabmargins=0)               # no tab strip: the side navigation picks the page
@@ -98,13 +96,14 @@ class App(tk.Tk):
         s.configure('Accent.TButton', background=ACC, foreground=ui.ON_ACCENT); s.map('Accent.TButton', background=[('active', '#0058c1'), ('disabled', PANEL)])
         s.configure('Spot.TButton', background=WARN, foreground=ui.ON_ACCENT); s.map('Spot.TButton', background=[('active', '#f5c862'), ('disabled', PANEL)], foreground=[('disabled', OFF)])
         s.configure('Danger.TButton', background='#7a2e32', foreground='white'); s.map('Danger.TButton', background=[('active', '#963a3f'), ('disabled', PANEL)])
-        s.configure('TLabel', background=BG, foreground=FG); s.configure('Dim.TLabel', foreground=DIM); s.configure('H.TLabel', font=(ui.family(self)['semi'], 11))
+        s.configure('TLabel', background=BG, foreground=FG); s.configure('Dim.TLabel', foreground=DIM); s.configure('H.TLabel', font=ui.font(self,15,bold=True))
         s.configure('TFrame', background=BG); s.configure('Card.TFrame', background=PANEL); s.configure('TLabelframe', background=BG, bordercolor=LN, relief='solid'); s.configure('TLabelframe.Label', background=BG, foreground=DIM)
         for w in ('TCheckbutton', 'TRadiobutton'):                                                   # dark boxes and dots instead of the light default
-            s.configure(w, background=BG, foreground=FG, indicatorbackground=F2, indicatorforeground=ui.TEXT, upperbordercolor=ui.LINE2, lowerbordercolor=ui.LINE2, focuscolor=BG)
+            s.configure(w, background=BG, foreground=FG, indicatorbackground=F2, indicatorforeground=ui.TEXT, upperbordercolor=ui.LINE2, lowerbordercolor=ui.LINE2, focuscolor=ACC)
             s.map(w, background=[('active', BG)], indicatorbackground=[('selected', ACC), ('active', HOV)], indicatorforeground=[('selected', ui.ON_ACCENT)])
         s.configure('Treeview', background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=ui.S(34), borderwidth=0)
         s.configure('Treeview.Heading', background=F2, foreground=FG, padding=(6, 5), borderwidth=0); s.map('Treeview', background=[('selected', '#dbe7f8')], foreground=[('selected', FG)])
+        s.map('TEntry',bordercolor=[('focus',ACC)]);s.map('TCombobox',bordercolor=[('focus',ACC)])
         s.configure('TEntry', insertcolor=FG, fieldbackground=F2, foreground=FG, padding=4)
         s.configure('TCombobox', arrowcolor=FG, background=F2, foreground=FG, fieldbackground=F2, padding=4)
         s.map('TCombobox', fieldbackground=[('readonly', F2)], foreground=[('readonly', FG)], selectbackground=[('readonly', F2)], selectforeground=[('readonly', FG)], background=[('readonly', F2)])
@@ -129,7 +128,7 @@ class App(tk.Tk):
             s.map(style,background=[('disabled',BG),('!disabled',BG)],foreground=[('disabled',OFF),('!disabled',foreground)])
 
     def _text(self, parent, h=10, **kw):
-        t = tk.Text(parent, bg=PANEL, fg=FG, insertbackground=FG, relief='flat', height=h, font=('Consolas', 9), wrap='none', **kw)
+        t = tk.Text(parent, bg=PANEL, fg=FG, insertbackground=FG, relief='flat', height=h, font=ui.mono(self,12), wrap='none', **kw)
         t.tag_config('ERR', foreground=BAD); t.tag_config('WARN', foreground=WARN); t.tag_config('OK', foreground=OK); t.tag_config('DIM', foreground=DIM); t.tag_config('ACC', foreground=ACC)
         return t
 
@@ -162,12 +161,12 @@ class App(tk.Tk):
         self.lights = {}
         for key, label in (('hosts', 'Hosts'), ('resolve', 'Resolver'), ('proxy', 'Proxy'), ('port', 'Port'), ('mirror', 'Mirror'), ('guard', 'Guard'), ('game', 'Game'), ('disk', 'Disk')):
             f = ttk.Frame(top, style='Card.TFrame'); f.pack(side='left', padx=3, ipadx=6, ipady=3)
-            dot = tk.Label(f, text='\u25cf', fg=OFF, bg=PANEL, font=('Segoe UI', 13)); dot.pack(side='left', padx=(6, 2))
-            nm = tk.Label(f, text=label, fg=DIM, bg=PANEL, font=('Segoe UI', 8)); nm.pack(side='top', anchor='w', padx=(0, 6))
-            val = tk.Label(f, text='-', fg=FG, bg=PANEL, font=('Segoe UI', 9)); val.pack(side='top', anchor='w', padx=(0, 6)); self.lights[key] = (dot, val)
+            dot = tk.Label(f, text='\u25cf', fg=OFF, bg=PANEL, font=ui.font(self,17)); dot.pack(side='left', padx=(6, 2))
+            nm = tk.Label(f, text=label, fg=DIM, bg=PANEL, font=ui.font(self,13)); nm.pack(side='top', anchor='w', padx=(0, 6))
+            val = tk.Label(f, text='-', fg=FG, bg=PANEL, font=ui.font(self,13)); val.pack(side='top', anchor='w', padx=(0, 6)); self.lights[key] = (dot, val)
             for w in (f, dot, nm, val): Tip(w, guide.LIGHT_HELP[key])                                      # what each light means, on hover
         body = tk.Frame(self.adv, bg=BG); body.pack(fill='both', expand=True)
-        side = tk.Frame(body, bg=ui.BG2, width=ui.S(210)); side.pack(side='left', fill='y'); side.grid_propagate(False)
+        self.nav_scroll=ui.Scroll(body,bg=ui.BG2);self.nav_scroll.configure(width=ui.S(round(210*self._text_scale)));self.nav_scroll.pack(side='left',fill='y');self.nav_scroll.pack_propagate(False);side=self.nav_scroll.body
         main = tk.Frame(body, bg=BG, width=1); main.pack(side='left', fill='both', expand=True, padx=ui.S(20), pady=(ui.S(16), ui.S(16))); main.pack_propagate(False); self._wrap_regs = []
         head = tk.Frame(main, bg=BG); head.pack(fill='x', pady=(0, ui.S(8)))
         self.page_title = tk.Label(head, text='', bg=BG, fg=FG, font=ui.font(self, 22, 'head', True), anchor='w'); self.page_title.pack(fill='x')
@@ -210,8 +209,11 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- tabs
     def _tab_dash(self, f):
+        taskbar = ttk.Frame(f); taskbar.pack(fill='x', pady=6)
+        for label, command in (('Stop streaming', self.do_stop), ('Pause downloads', self.do_mirror_pause), ('Stop everything', lambda:self.do_stop(everything=True)), ('Connection diagnostics', self.show_connection_details)):
+            ttk.Button(taskbar, text=label, command=command).pack(side='left', padx=4)
         slot_banner = ttk.Frame(f); slot_banner.pack(fill='x'); slot_guide = ttk.Frame(f); slot_guide.pack(fill='x')          # fixed places, so either can come and go without moving the other
-        self.setup_banner = tk.Label(slot_banner, text='', fg='white', bg='#7a2e32', anchor='w', padx=10, font=('Segoe UI', 10, 'bold'))      # packed only while something needs setting up
+        self.setup_banner = tk.Label(slot_banner, text='', fg='white', bg='#7a2e32', anchor='w', padx=10, font=ui.font(self,13,bold=True))      # packed only while something needs setting up
         gh = ttk.Frame(slot_guide); ttk.Label(gh, text='Guided setup (optional)').pack(side='left', padx=(0, 14))
         for text, cmd, tip in (('Start over', lambda: self.guide_do('restart'), 'Run the checklist again from the session step.'),
                                ('Simple view', lambda: self.guide_do('view'), 'Hide the advanced tabs and the detailed counters. Press again for the full view.'),
@@ -379,6 +381,8 @@ class App(tk.Tk):
         self.cfg['bulk_ack'] = version.__version__; config.save(self.cfg); version.record_bulk_ack(); return True
 
     def do_pack_start(self):
+        if not mirrordb.writable(paths.MIRROR):
+            messagebox.showerror('Offline storage','Choose a writable folder in Settings → Offline storage, then start the download.',parent=self);return
         try: self._pack_collect()
         except ValueError as ex: messagebox.showerror('Texture pack', str(ex), parent=self); return
         if not paths.CONFIGURED: messagebox.showerror('Texture pack', 'Set the game folder in the Game tab first.', parent=self); return
@@ -628,7 +632,7 @@ class App(tk.Tk):
         for w in self.val_frame.winfo_children(): w.destroy()
         col = dict(ok=OK, warn=WARN, fail=BAD, info=DIM)
         for i, r in enumerate(paths.validate()):
-            tk.Label(self.val_frame, text='●', fg=col[r['level']], bg=BG, font=('Segoe UI', 11)).grid(row=i, column=0, sticky='n', padx=(2, 4))
+            tk.Label(self.val_frame, text='●', fg=col[r['level']], bg=BG, font=ui.font(self,15)).grid(row=i, column=0, sticky='n', padx=(2, 4))
             ttk.Label(self.val_frame, text=r['name'], width=18).grid(row=i, column=1, sticky='nw'); ttk.Label(self.val_frame, text=r['detail'], wraplength=420, justify='left').grid(row=i, column=2, sticky='nw', pady=2)
         self._update_setup_banner()
 
@@ -678,7 +682,7 @@ class App(tk.Tk):
         l = ttk.LabelFrame(pan, text='CDN-host lines currently in the hosts file'); l.pack(side='left', fill='both', expand=True, padx=(0, 8))
         fr, self.hosts_txt = self._scrolled(l, 12); fr.pack(fill='both', expand=True, padx=6, pady=6)
         r = ttk.LabelFrame(pan, text='Backups (newest first)'); r.pack(side='left', fill='both', expand=True)
-        self.bk_list = tk.Listbox(r, bg=PANEL, fg=FG, relief='flat', selectbackground='#31507f', font=('Consolas', 9), height=12); self.bk_list.pack(fill='both', expand=True, padx=6, pady=6)
+        self.bk_list = tk.Listbox(r, bg=PANEL, fg=FG, relief='flat', selectbackground='#31507f', font=ui.mono(self,12), height=12); self.bk_list.pack(fill='both', expand=True, padx=6, pady=6)
         ttk.Button(r, text='Restore selected backup (UAC)', command=self.do_restore_backup).pack(pady=(0, 8))
         self._refresh_hosts_tab()
 
@@ -699,12 +703,12 @@ class App(tk.Tk):
             ttk.Label(g, text=label).grid(row=r, column=0, sticky='e', padx=12, pady=6); v = tk.StringVar(value=str(self.cfg[sub][key])); ttk.Entry(g, textvariable=v, width=w).grid(row=r, column=1, sticky='w'); self.sv[(sub, key)] = v
         row(0, 'Disk guard: xpak_cache limit (GiB)', 'limit_gib', 'guard'); row(1, 'Disk guard poll interval (s)', 'interval', 'guard')
         ttk.Label(g, text='When limit is hit').grid(row=2, column=0, sticky='e', padx=12, pady=6); self.sv_action = tk.StringVar(value=self.cfg['guard']['action'])
-        ttk.Combobox(g, textvariable=self.sv_action, values=('kill', 'warn'), state='readonly', width=8).grid(row=2, column=1, sticky='w'); ttk.Label(g, text='kill = terminate sp26-cod.exe (cache is disposable); warn = log only', style='Dim.TLabel').grid(row=2, column=2, sticky='w')
+        ttk.Combobox(g, textvariable=self.sv_action, values=('pause', 'warn', 'kill'), state='readonly', width=8).grid(row=2, column=1, sticky='w'); ttk.Label(g, text='pause = stop new transfers; warn = notify; kill = force-close (requires confirmation)', style='Dim.TLabel').grid(row=2, column=2, sticky='w')
         self.sv_guard = tk.BooleanVar(value=self.cfg['guard']['enabled']); ttk.Checkbutton(g, text='Start disk guard with the session', variable=self.sv_guard).grid(row=3, column=1, sticky='w', pady=4)
         self.sv_nw = tk.BooleanVar(value=self.cfg['watchers']['netwatch']); ttk.Checkbutton(g, text='Start netwatch (DNS/TCP log of the game) with the session', variable=self.sv_nw).grid(row=4, column=1, sticky='w', pady=4)
         ttk.Label(g, text='Hosts override when session stops / GUI closes').grid(row=5, column=0, sticky='e', padx=12, pady=6); self.sv_exit = tk.StringVar(value=self.cfg['hosts']['on_exit'])
         ttk.Combobox(g, textvariable=self.sv_exit, values=('ask', 'keep', 'remove'), state='readonly', width=8).grid(row=5, column=1, sticky='w')
-        self.sv_keep = tk.BooleanVar(value=self.cfg['keep_running_on_close']); ttk.Checkbutton(g, text='Keep proxy/guard running when the GUI closes (no prompt)', variable=self.sv_keep).grid(row=6, column=1, sticky='w', pady=4)
+        self.sv_keep = tk.BooleanVar(value=self.cfg['keep_running_on_close']); ttk.Checkbutton(g, text='Keep streaming and downloads running when the window closes (no prompt)', variable=self.sv_keep).grid(row=6, column=1, sticky='w', pady=4)
         ttk.Label(g, text='Rotate logs larger than (MB, 0 = never)').grid(row=7, column=0, sticky='e', padx=12, pady=6); self.sv_log = tk.StringVar(value=str(self.cfg['log_max_mb'])); ttk.Entry(g, textvariable=self.sv_log, width=8).grid(row=7, column=1, sticky='w')
         ttk.Label(g, text='checked at session start; 3 older copies are kept (.1 .2 .3)', style='Dim.TLabel').grid(row=7, column=2, sticky='w')
         bt = ttk.Frame(g); bt.grid(row=8, column=1, columnspan=2, sticky='w', pady=10)
@@ -714,6 +718,7 @@ class App(tk.Tk):
         ttk.Checkbutton(h, text='Simple view (hide the advanced tabs and the detailed counters)', variable=self.sv_simple, command=lambda: self.set_simple(self.sv_simple.get())).pack(anchor='w', padx=12, pady=2)
         hb = ttk.Frame(h); hb.pack(anchor='w', padx=12, pady=(2, 6))
         ttk.Button(hb, text='What do these words mean?', command=self.show_glossary).pack(side='left'); ttk.Button(hb, text='Before/after test', command=self.show_abtest).pack(side='left', padx=8)
+        textrow=ttk.Frame(h);textrow.pack(fill='x',padx=12,pady=8);ttk.Label(textrow,text='Text size').pack(side='left');self.text_size=tk.StringVar(value=f'{int(round(self._text_scale*100))}%');sizebox=ttk.Combobox(textrow,textvariable=self.text_size,values=('100%','115%','130%'),state='readonly',width=8);sizebox.pack(side='left',padx=8);sizebox.bind('<<ComboboxSelected>>',lambda e:self.set_text_scale(int(self.text_size.get().rstrip('%'))/100))
         i = ttk.LabelFrame(f, text='Where things are (game/cache/mirror/player-config locations: Game tab)'); i.pack(fill='x', pady=6)
         for k, v in (('Tools / scripts', paths.TOOLS), ('Work dir (logs, reports, settings)', paths.WORK), ('Hosts file', paths.hosts_path()), ('Runtime', 'built in, no Python needed' if paths.FROZEN else 'Python: ' + paths.PY)):
             r = ttk.Frame(i); r.pack(fill='x', padx=10, pady=2); ttk.Label(r, text=k, width=32, style='Dim.TLabel').pack(side='left'); ttk.Label(r, text=v).pack(side='left')
@@ -734,7 +739,7 @@ class App(tk.Tk):
             ex = os.path.isdir(root); fc = (now, root, ex, guide.score_folder(root) if ex else 0, gamefix.state(root) if ex else 'na'); self._gfc = fc
         tot = (getattr(self, '_pack_plan', None) or {}).get('total') or {}; rs = s.get('resolve') or {}
         if ps and ps.get('stat'):                                                    # what the proxy has done so far; kept after it stops, for the "what happened" text
-            c = ps['stat']; g = lambda k: c.get(k) or 0; self._guide_peak = dict(req=g('req'), mirror=g('mirror'), upok=g('ok') - g('mirror'), err=g('err'), skip=g('skip'), miss=g('miss'), secs=(ps.get('now') or 0) - (ps.get('started') or 0))
+            c = ps['stat']; g = lambda k: c.get(k) or 0; self._guide_peak = dict(req=g('req'), mirror=c.get('local',g('mirror')), upok=c.get('internet',g('ok') - g('mirror')), err=g('err') + g('miss'), skip=g('skip'), miss=g('miss'), secs=(ps.get('now') or 0) - (ps.get('started') or 0))
         return dict(configured=paths.CONFIGURED, folder_root=root, folder_exists=fc[2], folder_score=fc[3], game_setup=fc[4], blocked_by=blocked, port=port, free_gib=s.get('free'),
                     game_running=bool(s.get('game')), proxy_ready=bool(ps), proxy_alive=bool(pp.get('alive')), hosts_ok=s.get('hosts') in ('OK', 'FOREIGN', 'MIXED'),
                     resolve_ok=bool(rs.get('ok')), hosts_state=s.get('hosts', '?'), requests=int(ps['stat']['req']) if ps and ps.get('stat') else 0,
@@ -798,7 +803,7 @@ class App(tk.Tk):
         col = dict(done=OK, running=WARN, skipped=DIM, current=ACC, todo=OFF); mark = dict(done='\u2713', running='\u2026', skipped='-', current='\u25cf', todo='\u25cb')
         for r in rows:
             fr = ttk.Frame(self.guide_body); fr.pack(fill='x', pady=1); cur = r['status'] == 'current'
-            tk.Label(fr, text=mark[r['status']], fg=col[r['status']], bg=BG, width=2, font=('Segoe UI', 11, 'bold')).pack(side='left', anchor='n')
+            tk.Label(fr, text=mark[r['status']], fg=col[r['status']], bg=BG, width=2, font=ui.font(self,15,bold=True)).pack(side='left', anchor='n')
             tf = tk.Frame(fr, width=230, height=22, bg=BG); tf.pack(side='left', anchor='n'); tf.pack_propagate(False)                       # fixed cell: the texts line up whatever the font
             ttk.Label(tf, text=f"{r['n']}. {r['title']}", style='H.TLabel' if cur else 'TLabel').pack(side='left', anchor='w')
             bt = ttk.Frame(fr); bt.pack(side='right', anchor='n', padx=(8, 0))
@@ -812,12 +817,12 @@ class App(tk.Tk):
             ttk.Label(self.guide_body, text='All set. Next time: Start session, play, Stop session. "Start over" runs this checklist again.', style='H.TLabel').pack(anchor='w', pady=(4, 0))
         if lines:                                                                      # what happened in the session that just ended
             box = tk.Frame(self.guide_body, bg=PANEL); box.pack(fill='x', pady=(6, 0))
-            tk.Label(box, text='What happened', fg=ACC, bg=PANEL, font=('Segoe UI', 10, 'bold'), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
+            tk.Label(box, text='What happened', fg=ACC, bg=PANEL, font=ui.font(self,13,bold=True), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
             tk.Label(box, text='\n'.join(lines), fg=FG, bg=PANEL, anchor='w', justify='left', wraplength=wl + 330).pack(fill='x', padx=8, pady=2)
             bb = tk.Frame(box, bg=PANEL); bb.pack(anchor='w', padx=8, pady=(2, 6)); ttk.Button(bb, text='Before/after test', command=lambda: self.guide_do('abtest')).pack(side='left')
         for c in cards:                                                                # plain-language help for what is going wrong now
             box = tk.Frame(self.guide_body, bg=PANEL); box.pack(fill='x', pady=(6, 0))
-            tk.Label(box, text=c['title'], fg=WARN, bg=PANEL, font=('Segoe UI', 10, 'bold'), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
+            tk.Label(box, text=c['title'], fg=WARN, bg=PANEL, font=ui.font(self,13,bold=True), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
             tk.Label(box, text=c['text'], fg=FG, bg=PANEL, anchor='w', justify='left', wraplength=wl + 330).pack(fill='x', padx=8, pady=2)
             if c['actions']:
                 bb = tk.Frame(box, bg=PANEL); bb.pack(anchor='w', padx=8, pady=(2, 6))
@@ -868,7 +873,7 @@ class App(tk.Tk):
         """Show what was found (or nothing); the user picks one, browses to another, or cancels. Nothing is set without a click."""
         dlg = tk.Toplevel(self); dlg.title('Find my game folder'); dlg.configure(bg=BG); dlg.transient(self); dlg.geometry('760x330')
         ttk.Label(dlg, text=('I found these. Pick yours, or browse to another folder.' if found else 'I could not find it in the usual places. Browse to the folder that contains the game files.'), wraplength=720).pack(anchor='w', padx=12, pady=(12, 6))
-        lb = tk.Listbox(dlg, bg=PANEL, fg=FG, selectbackground='#31507f', activestyle='none', height=9, font=('Segoe UI', 9)); lb.pack(fill='both', expand=True, padx=12)
+        lb = tk.Listbox(dlg, bg=PANEL, fg=FG, selectbackground='#31507f', activestyle='none', height=9, font=ui.font(self,13)); lb.pack(fill='both', expand=True, padx=12)
         for c in found: lb.insert('end', guide.describe_candidate(c))
         if found: lb.selection_set(0)
         def use():
@@ -926,7 +931,7 @@ class App(tk.Tk):
         if st != st0: self._guide_save(st)
         if self._starting and self._starting_at and time.time() - self._starting_at > 120: self._starting = False          # never stay on 'Turning on...' for ever
         if self.page != 'home': return
-        s = self.snap or {}; extra = dict(motion=bool(self.cfg['ui'].get('reduce_motion')), system_motion=self._system_motion, pack=home.pack_text(self._pack_plan, s.get('mprog'), bool((s.get('mproc') or {}).get('alive'))))
+        s = self.snap or {}; extra = dict(motion=bool(self.cfg['ui'].get('reduce_motion')), system_motion=self._system_motion, text_scale=self._text_scale, mirror_folder=paths.MIRROR, mirror_running=bool((s.get('mproc') or {}).get('alive')), disk_paused=bool((s.get('gstat') or {}).get('hit') and (s.get('gstat') or {}).get('action') == 'pause'), pack=home.pack_text(self._pack_plan, s.get('mprog'), bool((s.get('mproc') or {}).get('alive'))))
         v = home.build(st, f, note=self._guide_note(), busy=self.busy, starting=self._starting, found=self._found, pick=self._pick, searching=self._searching, notice=version.NOTICE if self._notice_pending else '', extra=extra)
         self.home_view = v
         if self.home_page.page == 'download': self.home_page.set_view(v); self.home_page.render_download(self._download_view())
@@ -974,6 +979,10 @@ class App(tk.Tk):
             elif a == 'open_download': self.show_page('home'); self._pack_plan = None; self.home_page.show_page('download'); self.pack_refresh()
             elif a == 'back_home': self.home_page.show_page('home')
             elif a == 'pack_start': self.do_pack_start()
+            elif a == 'choose_mirror_folder': self.choose_mirror_folder()
+            elif a == 'open_diagnostics': self.show_connection_details()
+            elif a == 'stop_all': self.do_stop(everything=True)
+            elif a == 'cycle_text_size': self.set_text_scale(1.15 if self._text_scale < 1.1 else 1.3 if self._text_scale < 1.25 else 1.0)
             elif a == 'pack_pause': self.do_mirror_pause()
             elif a == 'pack_verify': self.do_pack_verify(False)
             elif a == 'pack_offline': self.guide_do('choose_offline'); self.do_pack_offline()
@@ -1110,6 +1119,8 @@ class App(tk.Tk):
                     free = __import__('shutil').disk_usage(paths.ROOT).free / 2**30; slow['free'] = free
                 s.update(slow)
                 s['pstat'] = proxyctl.fetch_stats(port); s['pproc'] = procs.status('proxy'); s['gproc'] = procs.status('guard')
+                if s['pstat']:slow['last_pstat']=s['pstat']
+                s['last_pstat']=slow.get('last_pstat') or proxyctl.read_json(proxyctl.PROXY_STATS)
                 s['gstat'] = proxyctl.read_json(proxyctl.GUARD_STATS) if s['gproc']['alive'] else None
                 s['mproc'] = procs.status('mirror'); s['mprog'] = mirrorctl.progress(); s['vproc'] = procs.status('mirror-verify'); s['vprog'] = mirrorctl.verify_progress() if s['vproc']['alive'] else None
                 s['session'] = session.session_info(); s['t'] = time.time()
@@ -1179,15 +1190,15 @@ class App(tk.Tk):
             xy = []
             for i, v in enumerate(vals): xy += [8 + (w - 16) * i / 179 + (w - 16) * (180 - len(vals)) / 179, top + ht - ht * v / mx]
             cv.create_line(*xy, fill=colr, width=1.6)
-            cv.create_text(w - 10, 8 + k * 14, text=f'{unit}: now {vals[-1]:.1f}  peak {mx:.1f}', fill=colr, anchor='e', font=('Consolas', 9))
+            cv.create_text(w - 10, 8 + k * 14, text=f'{unit}: now {vals[-1]:.1f}  peak {mx:.1f}', fill=colr, anchor='e', font=ui.mono(self,12))
 
     def _draw_hist(self, hist):
         cv = self.hist; cv.delete('all'); labels = ['<=64K', '<=256K', '<=1M', '<=4M', '<=8M', '<=16M', '>16M']
         mx = max([hist.get(k, 0) for k in labels] + [1])
         for i, k in enumerate(labels):
             v = hist.get(k, 0); y = 12 + i * 33; w = int(250 * v / mx)
-            cv.create_text(6, y + 10, text=k, fill=DIM, anchor='w', font=('Consolas', 9)); cv.create_rectangle(70, y, 70 + max(w, 1 if v else 0), y + 20, fill=BAD if k in ('<=8M', '<=16M', '>16M') else ACC, width=0)
-            cv.create_text(76 + w, y + 10, text=str(v), fill=FG, anchor='w', font=('Consolas', 9))
+            cv.create_text(6, y + 10, text=k, fill=DIM, anchor='w', font=ui.mono(self,12)); cv.create_rectangle(70, y, 70 + max(w, 1 if v else 0), y + 20, fill=BAD if k in ('<=8M', '<=16M', '>16M') else ACC, width=0)
+            cv.create_text(76 + w, y + 10, text=str(v), fill=FG, anchor='w', font=ui.mono(self,12))
 
     def _refresh_hosts_tab(self, h=None):
         try: st = hosts.status()
@@ -1267,20 +1278,89 @@ class App(tk.Tk):
         self.cfg['profiles'].pop(n, None); self.cfg['profile'] = 'Default'; config.save(self.cfg)
         self.prof_cb.configure(values=list(config.all_profiles(self.cfg))); self.profile.set('Default'); self._profile_changed()
 
+    def choose_mirror_folder(self):
+        if procs.status('proxy')['alive'] or procs.status('mirror')['alive']:
+            messagebox.showinfo('Storage folder','Stop streaming and pause downloads before changing the storage folder.',parent=self);return
+        from tkinter import filedialog
+        selected=filedialog.askdirectory(title='Choose offline texture storage',initialdir=paths.MIRROR if os.path.isdir(paths.MIRROR) else paths.GAME_ROOT,parent=self)
+        if not selected:return
+        if not mirrordb.writable(selected):
+            messagebox.showerror('Storage folder','Choose a folder you can write to.',parent=self);return
+        self.cfg['paths']['mirror_dir']=os.path.abspath(selected);config.save(self.cfg)
+        self.pv_loc['mirror_dir'].set(paths.MIRROR);self._pack_plan=None;self._pack_err=None;self._pack_where();self.pack_refresh()
+        self.say('Offline storage: '+paths.MIRROR,'OK')
+
+    def show_connection_details(self):
+        existing = getattr(self, '_connection_window', None)
+        if existing is not None and existing.winfo_exists(): existing.lift(); return
+        window = self._connection_window = tk.Toplevel(self); window.title('Connection diagnostics'); window.configure(bg=BG)
+        window.geometry('760x720'); window.minsize(600,420); window.transient(self)
+        scroll = ui.Scroll(window); scroll.pack(fill='both', expand=True)
+        inner=scroll.body; values=[];buttons=[]
+        for row in connection.rows(self.snap):
+            frame=ttk.LabelFrame(inner,text=row['label']); frame.pack(fill='x',padx=16,pady=6)
+            value=ttk.Label(frame,text='',wraplength=550); value.pack(fill='x',padx=10,pady=8); values.append(value)
+            button=ttk.Button(frame,text=row['button'],command=lambda a=row['action']:self.home_do(a));button.pack(anchor='e',padx=10,pady=(0,8));buttons.append(button)
+        close=ttk.Button(inner,text='Close',command=window.destroy);close.pack(pady=12);buttons[0].focus_set();window.after_idle(lambda:scroll.cv.yview_moveto(0))
+        window.bind('<Escape>',lambda e:window.destroy())
+        window._connection_refresh_job=None
+        def closing(event):
+            if event.widget is not window:return
+            try:
+                if window._connection_refresh_job:window.after_cancel(window._connection_refresh_job)
+                if self.home_page.btn_settings.winfo_exists():self.home_page.btn_settings.focus_set()
+            except tk.TclError:pass
+        window.bind('<Destroy>',closing)
+        def refresh():
+            if not window.winfo_exists(): return
+            rows=connection.rows(self.snap)
+            # Reopen with the new structure when a download starts/stops.
+            if len(rows)!=len(values): window.destroy();self.show_connection_details();return
+            for label,row in zip(values,rows): label.configure(text=row['value'] or 'Resolving address')
+            window._connection_refresh_job=window.after(1000,refresh)
+        refresh()
+
+    def set_text_scale(self, scale):
+        scale = scale if scale in (1.0,1.15,1.3) else 1.0
+        previous_scale=self._text_scale;ratio=scale/previous_scale; self._text_scale=scale
+        self.cfg['ui']['text_scale']=scale;config.save(self.cfg)
+        if hasattr(self,'text_size'):self.text_size.set(f'{int(round(scale*100))}%')
+        def visit(widget):
+            try:
+                if isinstance(widget, ui.Button):
+                    widget.f=ui.font(widget,widget.px,bold=True);widget.h=max(ui.S(36),int(widget.h*ratio));widget._draw()
+                elif 'font' in widget.keys() and widget.cget('font'):
+                    actual=tkfont.Font(root=self,font=widget.cget('font')).actual()
+                    if not hasattr(widget,'_base_text_font'): widget._base_text_font=(actual['family'],actual['size']/previous_scale,actual['weight'],actual['slant'])
+                    family,size,weight,slant=widget._base_text_font
+                    widget.configure(font=(family,int(round(size*scale)),weight,slant))
+                if isinstance(widget,tk.Canvas) and not isinstance(widget,ui.Button):
+                    for item in widget.find_all():
+                        if widget.type(item)=='text':
+                            actual=tkfont.Font(root=self,font=widget.itemcget(item,'font')).actual()
+                            widget.itemconfigure(item,font=(actual['family'],int(round(actual['size']*ratio)),actual['weight']))
+            except tk.TclError: pass
+            for child in widget.winfo_children(): visit(child)
+        visit(self);self._style();self.home_page.rail.configure(width=ui.S(round(210*scale)));self.nav_scroll.configure(width=ui.S(round(210*scale)));self.home_page.drawer._sig=None;self._home_tick_safe()
+        self.say(f'Text size: {int(round(scale*100))}%')
+
     def do_start(self):
         def go():
-            self.say('--- Start session ---', 'ACC'); ok, msg = session.start(self.cfg, self.say); self.say(('Session READY: ' if ok else 'Session NOT ready: ') + msg, 'OK' if ok else 'ERR')
-            if ok: self.say('You can launch the game now.', 'OK')
+            try:
+                self.say('--- Start session ---', 'ACC'); ok, msg = session.start(self.cfg, self.say)
+                self.say(('Session READY: ' if ok else 'Session NOT ready: ') + msg, 'OK' if ok else 'ERR')
+                if ok: self.say('You can launch the game now.', 'OK')
+            finally: self._starting = False
         self.bg('start', go)
 
-    def do_stop(self):
+    def do_stop(self, everything=False):
         def go():
             self.say('--- Stop session ---', 'ACC')
             try:                                      # traffic since the last report and the game is closed: write the report now (a running game gets its report when it exits)
                 if procs.image_running(*paths.GAME_EXES): self.say('game is still running: its session report is written when it exits', 'WARN')
                 else: self._make_report(-1, None, True)
             except Exception as e: self.say(f'report on stop failed: {e}', 'WARN')
-            r = session.stop(self.cfg, self.say)
+            r = session.stop(self.cfg, self.say, everything=everything)
             if r['hosts_active']: self._hosts_policy('Session stopped.')
         self.bg('stop', go)
 
@@ -1340,7 +1420,7 @@ class App(tk.Tk):
         for w in self.doc_frame.winfo_children(): w.destroy()
         col = dict(ok=OK, warn=WARN, fail=BAD, info=DIM)
         for i, r in enumerate(res):
-            tk.Label(self.doc_frame, text='●', fg=col[r['level']], bg=BG, font=('Segoe UI', 12)).grid(row=i, column=0, padx=(8, 4), pady=3, sticky='n')
+            tk.Label(self.doc_frame, text='●', fg=col[r['level']], bg=BG, font=ui.font(self,16)).grid(row=i, column=0, padx=(8, 4), pady=3, sticky='n')
             ttk.Label(self.doc_frame, text=r['name'], style='H.TLabel', width=20).grid(row=i, column=1, sticky='nw', pady=3)
             ttk.Label(self.doc_frame, text=r['detail'], wraplength=640, justify='left').grid(row=i, column=2, sticky='nw', pady=3, padx=6)
             if r.get('fix'): ttk.Button(self.doc_frame, text='Fix: ' + {'hosts_apply': 'apply hosts (UAC)', 'flush_dns': 'flush DNS (UAC)', 'start_proxy': 'start proxy', 'restart_proxy': 'restart proxy', 'kill_port_owner': 'stop port owner', 'game_fix': 'set up the game', 'game_undo': 'undo the game setup'}[r['fix'][0]],
@@ -1502,17 +1582,23 @@ class App(tk.Tk):
         try:
             for (sub, key), v in self.sv.items(): self.cfg[sub][key] = float(v.get()) if key == 'limit_gib' else int(float(v.get()))
         except ValueError as e: messagebox.showerror('Settings', f'invalid number: {e}', parent=self); return
+        if self.sv_action.get() == 'kill' and not self.cfg['guard'].get('force_close_confirmed'):
+            if not messagebox.askyesno('Force-close the game?', 'This option can force-close the game when the cache limit is reached. Unsaved progress may be lost. Enable it?', parent=self): return
+            self.cfg['guard']['force_close_confirmed'] = True
+        if self.sv_action.get() != 'kill': self.cfg['guard']['force_close_confirmed'] = False
         self.cfg['guard']['action'] = self.sv_action.get(); self.cfg['guard']['enabled'] = self.sv_guard.get(); self.cfg['watchers']['netwatch'] = self.sv_nw.get()
         self.cfg['hosts']['on_exit'] = self.sv_exit.get(); self.cfg['keep_running_on_close'] = self.sv_keep.get(); config.save(self.cfg); self.say('settings saved (apply on next session start)')
 
     def on_close(self):
-        pr = procs.status('proxy')['alive'] or procs.status('guard')['alive']; ha = self.snap.get('hosts', 'ABSENT') != 'ABSENT'
+        if self.busy:
+            messagebox.showinfo('Operation in progress','Wait for the current operation to finish before closing the app.',parent=self);return
+        pr = any(procs.status(n)['alive'] for n in ('proxy', 'guard', 'netwatch', 'mirror', 'mirror-verify')); ha = self.snap.get('hosts', 'ABSENT') != 'ABSENT'
         if (pr or ha) and not self.cfg['keep_running_on_close']:
-            a = messagebox.askyesnocancel('Close MW4 Texture Control', ('Proxy / guard are running.\n' if pr else '') + ('The hosts override is active.\n' if ha else '') +
+            a = messagebox.askyesnocancel('Close MW4 Texture Control', ('Streaming helpers or downloads are running.\n' if pr else '') + ('The hosts override is active.\n' if ha else '') +
                                           '\nYes = stop everything' + (' and apply the hosts policy' if ha else '') + '\nNo = close the window, leave everything running\nCancel = stay', parent=self)
             if a is None: return
             if a:
-                self.say('closing: stopping session'); r = session.stop(self.cfg, self.say)
+                self.say('closing: stopping session'); r = session.stop(self.cfg, self.say, everything=True)
                 if r['hosts_active']:
                     pol = self.cfg['hosts']['on_exit']
                     if pol == 'remove' or (pol == 'ask' and messagebox.askyesno('Hosts override', 'Remove the hosts override too? (UAC prompt)', parent=self)): self._hosts_do('remove')
@@ -1543,8 +1629,8 @@ ELEVATED_ONCE = '--elevated-once'                      # given to the relaunched
 
 def wants_elevation(argv, admin=None, env=None):
     """Should this start relaunch itself elevated? Not when it already is, when the user opted out, when this is the relaunched copy, or for the headless self-test."""
-    env = os.environ if env is None else env; admin = procs.is_admin() if admin is None else admin
-    return not (admin or env.get('CCS_NO_ELEVATE') or '--no-elevate' in argv or ELEVATED_ONCE in argv or '--selftest' in argv)
+    return False  # Only explicit hosts/game setup helpers request elevation.
+
 
 
 def dpi_aware():

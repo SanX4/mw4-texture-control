@@ -30,3 +30,15 @@ Session statistics describe requests handled by the app. To assess the picture i
 Close the game and stop the active session before updating. Run a newer Setup executable over the existing installation. Settings are stored separately from installed program files.
 
 Uninstall through Windows Settings → Apps or the Start menu. The uninstaller handles active helpers and the app's hosts entry and asks before deleting saved settings. Texture copies and the game folder are kept.
+
+## Connection diagnostics and controls
+
+Open Settings → Connection diagnostics to see the active streaming and download CDN addresses, fallback status, last successful delivery, and the last failure reason. Use the action beside a problem to inspect the connection, disk space, or logs.
+
+Stop streaming ends the streaming session while offline downloads continue. Pause downloads lets in-flight download objects finish and leaves streaming active. Stop everything ends streaming and downloads. Closing the window lists the active work and offers to stop it or leave it running.
+
+Disk protection pauses new transfers when the cache limit is reached or free disk space falls below 2 GiB. Existing transfers can finish. The game stays open. Free cache space to resume streaming; resume the offline download manually. Force-close is an explicit optional setting with a confirmation.
+
+Text size in Settings cycles between 100%, 115%, and 130%. Advanced Settings also has a text-size selector. Tab and Shift+Tab move through controls; Enter or Space activates buttons; Escape closes Settings. Focus stays within Settings while it is open and returns to its button when closed.
+
+Choose a writable **Offline storage** folder in Settings before downloading, especially if the game is installed under Program Files. Stop streaming and pause downloads before changing it.

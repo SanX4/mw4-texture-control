@@ -10,7 +10,7 @@ DEFAULTS = dict(
     profile='Default',
     paths=dict(game_root='', cache_dir='', mirror_dir='', player_cfg='', game_exes='', kill_exes=''),   # '' = not set / derived (see paths.py)
     proxy=dict(max_raw_mib=4096, budget_gib=120, retries=3, origin=True, offline=False, upstream_ip='', port=80),
-    guard=dict(enabled=True, limit_gib=100, action='kill', interval=5),
+    guard=dict(enabled=True, limit_gib=100, action='pause', interval=5, force_close_confirmed=False),
     hosts=dict(on_exit='ask'),            # ask | keep | remove  (what to do with the hosts override when the session is stopped / GUI closed)
     watchers=dict(netwatch=False),
     mirror=dict(workers=4, tier=4096, budget_gib=0, min_free_gib=40, max_rps=50, retries=4),
@@ -22,7 +22,7 @@ DEFAULTS = dict(
     bulk_ack='',                          # version of the bulk-download notice the user accepted
     guide=dict(enabled=False, path='', ms=[], skipped=[], confirmed_root='', offered='', simple=False, summary={}, ab=0),     # optional guided setup (see guide.py)
     notice_ack='',                        # version of the research/responsibility notice the user has seen
-    ui=dict(reduce_motion=False),         # look and feel: no animations when True (Windows' own animation switch is honoured too)
+    ui=dict(reduce_motion=False, text_scale=1.0),         # look and feel: no animations when True (Windows' own animation switch is honoured too)
 )
 
 BUILTIN_PROFILES = {
@@ -51,6 +51,7 @@ def load():
     cfg = copy.deepcopy(DEFAULTS)
     try: _merge(cfg, json.load(open(_path(), encoding='utf-8')))
     except Exception: pass
+    if cfg['guard'].get('action') == 'kill' and not cfg['guard'].get('force_close_confirmed'): cfg['guard']['action'] = 'pause'
     return cfg
 
 
@@ -68,6 +69,7 @@ def effective(cfg):
     """Copy of cfg with the selected profile's overrides applied to proxy / guard / watchers."""
     out = copy.deepcopy(cfg); prof = all_profiles(cfg).get(cfg.get('profile'), {})
     for sec in SECTIONS: out[sec].update(prof.get(sec, {}))
+    if out['guard'].get('action') == 'kill' and not out['guard'].get('force_close_confirmed'): out['guard']['action'] = 'pause'
     pk = out['pack']
     if pk.get('link_caps', True):                       # one detail level drives both caps: what is served never exceeds what was mirrored
         mib = pack.level_mib(pk.get('level')); out['proxy']['max_raw_mib'] = mib; out['mirror']['tier'] = mib

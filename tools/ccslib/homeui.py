@@ -31,11 +31,11 @@ class HomePage(tk.Frame):
     def __init__(self, parent, ticker, on_action, version='', tip=None):
         super().__init__(parent, bg=BG); ui.init(self)
         self.ticker, self.act, self.version, self.tip_factory = ticker, on_action, version, tip; self.tips = {}; self.page = 'home'; self._dsig = None; self.dview = None
-        self.view = None; self._sig = None; self._pick_cb = None; self._dots = 0; self._compact = False
+        self.view = None; self._sig = None; self._pick_cb = None; self._dots = 0; self._compact = False;self._stack_kpis=False
         self._build_sidebar()
         self.main = tk.Frame(self, bg=BG); self.main.pack(side='left', fill='both', expand=True)
         self._build_header(); self._build_footer()
-        self.stage = tk.Frame(self.main, bg=BG); self.stage.pack(fill='both', expand=True)
+        self.home_scroll=ui.Scroll(self.main,bg=BG);self.home_scroll.pack(fill='both',expand=True);self.stage=self.home_scroll.body
         self.col = tk.Frame(self.stage, bg=BG); self.col.place(relx=.5, rely=.5, anchor='center')
         self.stage.bind('<Configure>', self._resize)
         self.ring = ui.Ring(self.col, d=144, thick=6, ticker=ticker)
@@ -45,7 +45,7 @@ class HomePage(tk.Frame):
         self.hero_panel = None
         self.body_box = tk.Frame(self.col, bg=BG)                     # the first-run cards
         self.card_labels = []; self.kpi_labels = {}; self.spark = None; self.step_pill = None
-        self.dl_col = tk.Frame(self.stage, bg=BG); self.drawer = Drawer(self, ticker, self._row_action)
+        self.dl_col = tk.Frame(self.stage, bg=BG);self.col.bind('<Configure>',self._content_size);self.dl_col.bind('<Configure>',self._content_size); self.drawer = Drawer(self, ticker, self._row_action)
         self.stage.bind('<Button-1>', lambda e: self.drawer.hide(), add='+'); self.col.bind('<Button-1>', lambda e: self.drawer.hide(), add='+')
         self.winfo_toplevel().bind('<Escape>', lambda e: self.drawer.hide(), add='+')
         self._tip('ring', self.ring, ''); self._tip('stepper', self.stepper, ''); self._tip('footer', self.foot_txt, '')
@@ -72,7 +72,7 @@ class HomePage(tk.Frame):
         elif self.view: self.drawer.show(self.view['settings'])
 
     def _row_action(self, action):
-        if action not in ('toggle_motion', 'switch_path', 'game_setup'): self.drawer.hide()
+        if action not in ('toggle_motion', 'cycle_text_size', 'switch_path', 'game_setup'): self.drawer.hide()
         self.act(action)
 
     def show_page(self, name):
@@ -86,7 +86,7 @@ class HomePage(tk.Frame):
 
     # ------------------------------------------------------------------------ header and footer
     def _build_sidebar(self):
-        rail = tk.Frame(self, bg=ui.BG2, width=S(210)); rail.pack(side='left', fill='y'); rail.pack_propagate(False)
+        rail = self.rail = tk.Frame(self, bg=ui.BG2, width=S(round(210*getattr(self._root(),'_text_scale',1.0)))); rail.pack(side='left', fill='y'); rail.pack_propagate(False)
         brand = tk.Frame(rail, bg=ui.BG2); brand.pack(fill='x', padx=S(22), pady=(S(28), S(28)))
         p = launch.resource('brand.png')
         if p:
@@ -128,8 +128,14 @@ class HomePage(tk.Frame):
         w, h = self.stage.winfo_width(), self.stage.winfo_height()
         if w < 50: return
         (self.dl_col if self.page == 'download' else self.col).place_configure(width=min(S(CONTENT_W), w - S(56)))                      # only the page that is showing (place_configure would bring the other back)
-        compact = h < S(510)
-        if compact != self._compact: self._compact = compact; self._sig = None; self.render(self.view) if self.view else None
+        compact = self.home_scroll.cv.winfo_height() < S(510)
+        stacked=w-S(56)<S(round(850*getattr(self._root(),'_text_scale',1.0)))
+        if compact != self._compact or stacked != self._stack_kpis: self._compact = compact;self._stack_kpis=stacked; self._sig = None; self.render(self.view) if self.view else None
+
+    def _content_size(self, event=None):
+        page=self.dl_col if self.page=='download' else self.col
+        desired=page.winfo_reqheight()+S(24)
+        if int(str(self.stage.cget('height')))!=desired:self.stage.configure(height=desired)
 
     # ------------------------------------------------------------------------ render
     def set_view(self, v):
@@ -209,13 +215,17 @@ class HomePage(tk.Frame):
 
     def _build_kpis(self, v):
         for i, k in enumerate(v['kpis']):
-            p = ui.Panel(self.kpi_row, fill=CARD, r=14, padx=18, pady=12, shrink=True); p.pack(side='left', padx=S(7))
+            p = ui.Panel(self.kpi_row, fill=CARD, r=14, padx=18, pady=12, shrink=True)
+            if self._stack_kpis:p.grid(row=0,column=i,sticky='ew',padx=S(6));self.kpi_row.grid_columnconfigure(i,weight=1)
+            else:p.pack(side='left',padx=S(7))
             tk.Label(p.body, text=k['title'].upper(), bg=CARD, fg=FAINT, font=ui.font(self, 11), anchor='w').pack(fill='x', ipadx=S(30))
             line = tk.Frame(p.body, bg=CARD); line.pack(fill='x'); val = tk.Label(line, text=k['value'], bg=CARD, fg=TEXT, font=ui.font(self, 19, 'head', True)); val.pack(side='left')
             unit = tk.Label(line, text=' ' + k['unit'], bg=CARD, fg=DIM, font=ui.font(self, 12)); unit.pack(side='left', pady=(S(5), 0)); self.kpi_labels[k['title']] = (val, unit)
-        p = ui.Panel(self.kpi_row, fill=CARD, r=14, padx=14, pady=10, shrink=True); p.pack(side='left', padx=S(7))
-        tk.Label(p.body, text='LAST 3 MINUTES', bg=CARD, fg=FAINT, font=ui.font(self, 11), anchor='w').pack(fill='x')
-        self.spark = tk.Canvas(p.body, width=S(200), height=S(40), bg=CARD, highlightthickness=0); self.spark.pack()
+        p = ui.Panel(self.kpi_row, fill=CARD, r=14, padx=14, pady=10, shrink=True)
+        if self._stack_kpis:p.grid(row=1,column=0,columnspan=3,sticky='ew',padx=S(6),pady=(S(10),0))
+        else:p.pack(side='left',padx=S(7))
+        self.speed_label=tk.Label(p.body,text='TRANSFER SPEED',bg=CARD,fg=FAINT,font=ui.font(self,11),anchor='w');self.speed_label.pack(fill='x')
+        self.spark = tk.Canvas(p.body, width=S(200), height=S(40), bg=CARD, highlightthickness=0); self.spark.pack(fill='x',expand=True)
 
     def _build_alert(self, a, box=None):
         box = box or self.alert_box; warm = ui.mix(WARN, BG, .88); p = ui.Panel(box, fill=warm, border=ui.mix(WARN, BG, .62), r=18, padx=22, pady=18, shrink=True); p.pack(pady=(S(16), 0))
@@ -283,7 +293,9 @@ class HomePage(tk.Frame):
                 if pair:
                     if pair[0].cget('text') != k['value']: pair[0].configure(text=k['value'])
                     if pair[1].cget('text') != ' ' + k['unit']: pair[1].configure(text=' ' + k['unit'])
-            if self.spark is not None: self._draw_spark(v['spark'])
+            if self.spark is not None:
+                self._draw_spark(v['spark'])
+                self.speed_label.configure(text=f"TRANSFER · {v['speed']:.1f} MiB/s" if v.get('speed') is not None else 'TRANSFER SPEED')
         h = home.help_for(v); self._tip('ring', self.ring, h['ring']); self._tip('stepper', self.stepper, h['steps']); self._tip('footer', self.foot_txt, h['footer'])
         for i, (lab, t) in enumerate(zip(self.card_labels, h['cards'])): self._tip(f'card{i}', lab, t)
         for title, (val, unit) in self.kpi_labels.items(): self._tip('kpi-' + title, val, h['kpis'].get(title, ''))
@@ -351,20 +363,22 @@ class HomePage(tk.Frame):
 
 class Drawer(tk.Frame):
     """The Settings panel that slides in from the right. show(sections) / hide(); on_row(action) is called for a row that has an action."""
-    W = 360
+    W = 460
 
     def __init__(self, page, ticker, on_row):
         super().__init__(page, bg=ui.BG2); self.page, self.ticker, self.on_row = page, ticker, on_row; self.is_open = False; self._sig = None
-        tk.Frame(self, bg=LINE, width=1).pack(side='left', fill='y'); self.inner = tk.Frame(self, bg=ui.BG2); self.inner.pack(side='left', fill='both', expand=True, padx=S(22), pady=S(20))
+        tk.Frame(self, bg=LINE, width=1).pack(side='left', fill='y'); self.scroll=ui.Scroll(self,bg=ui.BG2); self.scroll.pack(side='left',fill='both',expand=True,padx=S(14),pady=S(14)); self.inner=self.scroll.body
+        self._focusables=[];self._focus_tag='MW4Drawer'+str(id(self));self.bind_class(self._focus_tag,'<Tab>',lambda e:self._focus_next(1));self.bind_class(self._focus_tag,'<Shift-Tab>',lambda e:self._focus_next(-1))
 
     def show(self, sections):
         self.build(sections)
         if self.is_open: return
         self.is_open = True; self.lift(); self._slide(True)
+        if self._focusables: self.after_idle(self._focusables[0].focus_set)
 
     def hide(self):
         if not self.is_open: return
-        self.is_open = False; self._slide(False)
+        self.is_open = False; self._slide(False); self.page.btn_settings.focus_set()
 
     def update(self, sections):
         if self.is_open: self.build(sections)
@@ -387,20 +401,23 @@ class Drawer(tk.Frame):
             self.place_configure(x=int(round(self._offset)))
             if abs(self._offset-target)<.5 and abs(self._velocity)<2:
                 self._offset=target; self._velocity=0.0; self.ticker.remove(key); self.place_configure(x=int(target))
-                if not self.is_open: self.place_forget(); self.page.btn_settings.focus_set()
+                if not self.is_open: self.place_forget()
         self._offset=x; self.ticker.add(key,tick)
 
     def build(self, sections):
         sig = json.dumps(sections, default=str)
         if sig == self._sig: return
-        self._sig = sig
+        focused=self.focus_get(); restore=getattr(focused,'_drawer_action',None)
+        self._sig = sig; self._focusables=[]
         for c in self.inner.winfo_children(): c.destroy()
         bg = ui.BG2; head = tk.Frame(self.inner, bg=bg); head.pack(fill='x')
         tk.Label(head, text='Settings', bg=bg, fg=TEXT, font=ui.font(self, 20, 'head', True)).pack(side='left')
-        ui.Button(head, '', self.hide, kind='ghost', icon_name='x', height=32, px=14, pad=8, bg=bg).pack(side='right')
+        close=ui.Button(head, 'Close settings', self.hide, kind='ghost', icon_name='x', height=32, px=14, pad=8, bg=bg);close.pack(side='right');self._track_focus(close,'close')
         for sec in sections:
             tk.Label(self.inner, text=sec['title'].upper(), bg=bg, fg=FAINT, font=ui.font(self, 11), anchor='w').pack(fill='x', pady=(S(18), S(4)))
             for r in sec['rows']: self._row(r, bg)
+        if restore:
+            match=next((w for w in self._focusables if w._drawer_action==restore),self._focusables[0]);self.after_idle(match.focus_set)
 
     def _row(self, r, bg):
         act = r['action']; fr = tk.Frame(self.inner, bg=bg, cursor='hand2' if act else 'arrow', takefocus=bool(act), highlightthickness=1, highlightbackground=bg, highlightcolor=ACCENT); fr.pack(fill='x')
@@ -411,5 +428,19 @@ class Drawer(tk.Frame):
         def paint(on):
             for w in kids: w.configure(bg=CARD if on else bg)
         if act:
+            self._track_focus(fr,act)
             fr.bind('<Return>',lambda e,a=act:self.on_row(a)); fr.bind('<space>',lambda e,a=act:self.on_row(a))
             for w in kids: w.bind('<Enter>', lambda e: paint(True)); w.bind('<Leave>', lambda e: paint(False)); w.bind('<Button-1>', lambda e, a=act: self.on_row(a))
+
+
+    def _track_focus(self, widget, action):
+        widget._drawer_action=action;self._focusables.append(widget)
+        widget.bindtags((self._focus_tag,)+widget.bindtags())
+        widget.bind('<FocusIn>',lambda e:self.scroll.reveal(widget),add='+')
+
+    def _focus_next(self, direction):
+        widgets=[w for w in self._focusables if w.winfo_exists()]
+        if widgets:
+            current=self.focus_get();index=widgets.index(current) if current in widgets else -1
+            widgets[(index+direction)%len(widgets)].focus_set()
+        return 'break'

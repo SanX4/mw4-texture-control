@@ -18,7 +18,7 @@ STEP_LABELS = ('Game found', 'Turn on', 'Play', 'Done')
 PACK_MIN_GIB = 54                                                   # the smallest offline copy (campaign only)
 ACTIONS = ('turn_on', 'turn_off', 'find_folder', 'use_found', 'confirm_anyway', 'choose_quick', 'choose_offline', 'pick_quick', 'pick_offline', 'game_setup', 'help',
            'open_check', 'open_report', 'abtest', 'done', 'apply_hosts', 'activity', 'open_advanced', 'open_settings', 'switch_path', 'what_setup', 'notice_ok', 'toggle_motion',
-           'open_download', 'back_home', 'pack_start', 'pack_pause', 'pack_verify', 'pack_offline', 'set_scope_sp', 'set_scope_all', 'set_level_standard', 'set_level_high', 'set_level_ultra')
+           'choose_mirror_folder', 'open_diagnostics', 'stop_all', 'cycle_text_size', 'open_download', 'back_home', 'pack_start', 'pack_pause', 'pack_verify', 'pack_offline', 'set_scope_sp', 'set_scope_all', 'set_level_standard', 'set_level_high', 'set_level_ultra')
 MAP = dict(start_session='turn_on', stop_session='turn_off', doctor='open_check', find_folder='find_folder', game_setup='game_setup', apply_hosts='apply_hosts',
            confirm_anyway='confirm_anyway', hosts_remove='turn_off')                               # guide.coach actions -> Home actions
 
@@ -73,10 +73,10 @@ def _preflight_alert(st, f):
 
 
 def _kpis(f):
-    st = f.get('stat') or {}; err, retry = int(st.get('err', 0)), int(st.get('retry', 0)); mir = int(st.get('mirror', 0)); up = max(0, int(st.get('ok', 0)) - mir)
-    src = 'Your offline copy' if mir and not up else 'Offline copy and internet' if mir else 'The internet'
-    mib = f.get('mibps')
-    return [dict(title='Speed', value=f'{mib:.1f}' if mib is not None else '-', unit='MB/s'), dict(title='Failed', value=str(err), unit=f'{retry} retried' if retry else ''), dict(title='Loaded from', value=src, unit='')]
+    st = f.get('stat') or {}; err, retry = int(st.get('err', 0)) + int(st.get('miss',0)), int(st.get('retry', 0)); mir = int(st.get('local', st.get('mirror', 0))); up = int(st['internet']) if 'internet' in st else max(0, int(st.get('ok', 0)) - mir)
+    return [dict(title='Internet', value=f'{up:,}', unit='delivered'), dict(title='Local copy', value=f'{mir:,}', unit='delivered'),
+            dict(title='Failed', value=f'{err:,}', unit=f'{retry} retried' if retry else '')]
+
 
 
 def summary_text(s):
@@ -86,19 +86,21 @@ def summary_text(s):
     if req == 0: return "Nothing reached HD textures this time, so the game wasn't served by it. Check my PC can tell you why (most often the game was already running)."
     err, mins = int(s.get('err', 0)), int(s.get('secs', 0) // 60)
     t = f'The game asked for {req:,} textures' + (f' in about {mins} min' if mins >= 1 else '')
-    return t + (' and every one was delivered.' if not err else f'. {err:,} requests failed; the game asks again, a few are normal.')
+    if 'upok' not in s and 'mirror' not in s: return t + f'. {err:,} failures recorded; delivery counts are unavailable for this saved session.'
+    return t + f". {int(s.get('upok',0)):,} internet deliveries, {int(s.get('mirror',0)):,} local deliveries, {err:,} failures."
 
 
 def settings_rows(st, f, extra=None):
     """The Settings drawer: sections of rows (icon, label, value, action). extra = dict(motion=bool, pack=text for the offline copy)."""
     extra = extra or {}; path = st['path'] or 'quick'; gs = f.get('game_setup'); setup = {'needed': 'Needs a change', 'ok': 'Done'}.get(gs, 'Not needed')
     return [dict(title='Textures', rows=[dict(icon='wifi' if path != 'offline' else 'download', label='How textures load', value='While I play' if path != 'offline' else 'From my offline copy', action='switch_path', tone=''),
-                                         dict(icon='download', label='Offline copy', value=extra.get('pack', 'Not downloaded'), action='open_download', tone='')]),
+                                         dict(icon='folder',label='Offline storage',value=short_path(extra.get('mirror_folder',''),1) if extra.get('mirror_folder') else 'Choose a folder',action='choose_mirror_folder',tone=''), dict(icon='download', label='Offline copy', value=extra.get('pack', 'Not downloaded'), action='open_download', tone='')]),
             dict(title='Game', rows=[dict(icon='folder', label='Game folder', value=short_path(f.get('folder_root', ''), 1), action='find_folder', tone=''),
                                      dict(icon='bolt', label='One-time game setup', value=setup, action='game_setup' if gs == 'needed' else '', tone='warn' if gs == 'needed' else 'ok' if gs == 'ok' else '')]),
-            dict(title='Help', rows=[dict(icon='shield', label='Check my PC', value='', action='open_check', tone=''), dict(icon='help', label='What do the words mean?', value='', action='help', tone=''),
+            dict(title='Session and downloads', rows=[dict(icon='pause', label='Stop streaming', value='Downloads keep running', action='turn_off', tone=''), dict(icon='download', label='Pause downloads', value='Streaming stays on', action='pack_pause', tone=''), dict(icon='power', label='Stop everything', value='Streaming and downloads', action='stop_all', tone='')]),
+            dict(title='Help', rows=[dict(icon='wifi', label='Connection diagnostics', value='', action='open_diagnostics', tone=''), dict(icon='shield', label='Check my PC', value='', action='open_check', tone=''), dict(icon='help', label='What do the words mean?', value='', action='help', tone=''),
                                      dict(icon='chart', label='Reports and logs', value='', action='open_report', tone=''), dict(icon='gamepad', label='Before / after test', value='', action='abtest', tone='')]),
-            dict(title='Look and feel', rows=[dict(icon='refresh', label='Reduce motion', value='On (Windows setting)' if extra.get('system_motion') else 'On' if extra.get('motion') else 'Off',
+            dict(title='Look and feel', rows=[dict(icon='sliders', label='Text size', value=f"{int(round(extra.get('text_scale', 1.0)*100))}%", action='cycle_text_size', tone=''), dict(icon='refresh', label='Reduce motion', value='On (Windows setting)' if extra.get('system_motion') else 'On' if extra.get('motion') else 'Off',
                                                     action='' if extra.get('system_motion') else 'toggle_motion', tone='')]),
             dict(title='Advanced', rows=[dict(icon='sliders', label='Advanced mode', value='Every setting', action='open_advanced', tone='')])]
 
@@ -109,7 +111,7 @@ HELP = dict(
     cards=dict(folder='The folder your game is installed in. Press Change to pick another one.',
                textures='While I play: the game gets its textures from the internet as it asks for them. From my offline copy: they come from a copy saved on this PC.',
                space='Free space on the drive your game is on.'),
-    kpis={'Speed': 'How fast textures are arriving right now.', 'Failed': 'Requests that still failed after retries. A few are normal: the game simply asks again.', 'Loaded from': 'Where the textures come from: the internet, or the offline copy on this PC.'},
+    kpis={'Speed': 'How fast textures are arriving right now.', 'Failed': 'Requests that still failed after retries. A few are normal: the game simply asks again.', 'Internet': 'Successful requests served from the internet.', 'Local copy': 'Successful requests served from the local copy.'},
     footer='A quick summary of the checks the tool runs by itself. Check my PC (in Settings) shows every one of them.',
     steps='Where you are: find the game, turn HD textures on, play, done.',
     turn_on='Switches HD textures on. One small change is made to a Windows network file and it is undone when you turn this off.',
@@ -196,17 +198,24 @@ def _eta_text(secs):
 NOTICE_BUTTON = 'I understand, continue'
 
 
+def task_status(view, extra):
+    if extra and extra.get('mirror_running'):
+        view['links']=[('pack_pause','Pause downloads'),('stop_all','Stop everything'),('open_settings','Settings')]
+        level,text=view['footer'];view['footer']=(level,text+' · Offline download running')
+    return view
+
+
 def build(state, f, note='', busy=False, starting=False, found=None, pick=None, searching=False, notice='', extra=None):
     """The Home view. state = guide state, f = facts (guide facts plus optional stat / mibps / spark / secs), note = the last problem text, busy = an action is running,
     starting = the user just pressed Turn on, found = game folders the finder offered (None until it ran), pick = the first-run choice the user has marked."""
     st = guide.clean_state(state); live = guide.live_session(f); ms = set(st['ms']); coach = guide.coach(st, f, note)
     v = dict(mode='', layout='hero', ring=dict(kind='off', frac=0.0, icon='power', big='', small=''), headline='', sub='', primary=None, secondary=[], steps=None, cards=[], kpis=[], spark=[],
-             alert=None, waiting=False, notice='', settings=[], choices=[], folder=None, wizard=None, footer=('ok', 'Everything checks out'), links=[('activity', 'Activity'), ('open_advanced', 'Advanced mode')], busy=bool(busy))
+             alert=None, waiting=False, speed=f.get('mibps'), notice='', settings=[], choices=[], folder=None, wizard=None, footer=('ok', 'Everything checks out'), links=[('activity', 'Activity'), ('open_advanced', 'Advanced mode')], busy=bool(busy))
     v['settings'] = settings_rows(st, f, extra); ok_folder = guide.folder_ok(st, f)
     if notice:                                                    # the research / responsibility notice, once per version, before anything else
         v.update(mode='notice', layout='wizard', wizard=None, headline='Before you start', sub='', notice=notice, footer=('off', 'Please read this once per version'), links=[],
                  primary=('notice_ok', NOTICE_BUTTON, 'check'))
-        return v
+        return task_status(v, extra)
     # ---- first run: the game folder, how textures load, the one-time game setup
     if not live and not f.get('proxy_alive') and not ok_folder:
         v.update(mode='find', layout='wizard', wizard=(1, 3), footer=('off', 'First-time setup  -  about a minute'), links=[('open_advanced', 'Advanced mode')])
@@ -224,7 +233,7 @@ def build(state, f, note='', busy=False, starting=False, found=None, pick=None, 
                      primary=('use_found', 'Yes, use this one', 'arrow'), secondary=[('find_folder', 'Choose another folder')])
         else:
             v.update(headline="I couldn't find your game", sub='It is not in the usual places. Point me to the folder that has the game files.', primary=('find_folder', 'Choose the folder', 'folder'))
-        return v
+        return task_status(v, extra)
     if not live and not f.get('proxy_alive') and not st['path']:
         sel = pick if pick in guide.PATHS else 'quick'; free = f.get('free_gib')
         low = free is not None and free < PACK_MIN_GIB
@@ -234,49 +243,51 @@ def build(state, f, note='', busy=False, starting=False, found=None, pick=None, 
                           dict(id='offline', icon='download', title='Download them once', text='Save the texture pack on this PC, then play from disk. Best for slow or limited internet.', tag='', selected=sel == 'offline',
                                bullets=[('Works with little or no internet', 'ok'), ('About 54 to 82 GB of disk', 'warn' if low else 'ok'), ('Download can be paused any time', 'ok')] + ([('Not enough free space on this drive', 'bad')] if low else []))],
                  primary=('choose_' + sel, 'Continue', 'arrow'))
-        return v
+        return task_status(v, extra)
     needs_setup = f.get('game_setup') == 'needed'
     if not live and not f.get('proxy_alive') and needs_setup:
         v.update(mode='setup', layout='wizard', wizard=(3, 3), headline='One small change in your game folder', footer=('off', 'First-time setup'), links=[('open_advanced', 'Advanced mode')],
                  sub='So the game uses the textures this tool sends it, two settings change: the game goes into online mode and its cache folder gets a link. A backup is made first and you can undo it any time.',
                  primary=('game_setup', 'Make the change', 'check'), secondary=[('help', 'What does this do?')])
-        return v
+        return task_status(v, extra)
     # ---- the hero layout
     v['cards'] = _cards(st, f); gone = []
     for c in coach: gone.append(dict(id=c['id'], title=c['title'], text=c['text'], actions=_plain(c['actions'])))
     alert = gone[0] if gone else None
+    if extra and extra.get('disk_paused'):
+        alert=dict(id='disk_paused',title='Disk protection paused transfers',text='A disk protection limit was reached. The game stays open. Free cache space to resume streaming, then resume any offline download manually.',actions=[('open_check','Check disk space')])
     if live:
         req = int(f.get('requests', 0)); running = bool(f.get('game_running'))
         if req > 0:
             closed = not running
-            v.update(mode='playing', steps=(STEP_LABELS, 2), ring=dict(kind='full', frac=1.0, icon=None, big=f'{req:,}', small='textures delivered'),
-                     headline='Game closed' if closed else 'Playing with HD textures', kpis=_kpis(f), spark=list(f.get('spark') or []),
+            v.update(mode='playing', steps=(STEP_LABELS, 2), ring=dict(kind='full', frac=1.0, icon=None, big=f'{req:,}', small='requests'),
+                     headline='Game closed' if closed else 'Texture streaming active', kpis=_kpis(f), spark=list(f.get('spark') or []),
                      sub=(f"{fmt_dur(f.get('secs'))} so far. " if f.get('secs') else '') + ('The session is still on. Turn it off when you are done.' if closed else (
-                         'Everything the game asked for was delivered.' if not int((f.get('stat') or {}).get('err', 0)) else 'A few requests failed; the game asks again, that is normal.')),
-                     secondary=[('turn_off', 'Turn off' if closed else 'Turn off when you are done')], footer=('ok', 'Game running  -  no problems'))
+                         'Requests are being handled. See the delivery counts below.' if not int((f.get('stat') or {}).get('err', 0)) else 'Some requests failed. Open connection diagnostics for details.')),
+                     secondary=[('turn_off', 'Stop streaming')], footer=('ok', 'Streaming active · game closed' if closed else 'Texture streaming active'))
         else:
-            v.update(mode='waiting', steps=(STEP_LABELS, 2), ring=dict(kind='on', frac=1.0, icon='power', big='', small='ON'), headline='HD textures are on',
-                     sub=('The game is starting. Textures show up here as soon as it asks for them.' if running else 'Now start your game as you normally do. Keep this window open while you play.'), secondary=[('turn_off', 'Turn off')], waiting=True, footer=('ok', 'HD textures are on  -  everything checks out'))
+            v.update(mode='waiting', steps=(STEP_LABELS, 2), ring=dict(kind='on', frac=1.0, icon='power', big='', small='ON'), headline='Texture streaming active',
+                     sub=('The game is starting. Textures show up here as soon as it asks for them.' if running else 'Now start your game as you normally do. Keep this window open while you play.'), secondary=[('turn_off', 'Stop streaming')], waiting=True, footer=('ok', 'Texture streaming active'))
         if alert: v['alert'] = alert; v['footer'] = ('warn', 'Needs your attention')
-        return v
+        return task_status(v, extra)
     pre = _preflight_alert(st, f); has_note = bool(note and alert and alert['id'] in HEADLINES); lost = bool(alert and alert['id'] == 'hosts_lost')
     if (f.get('proxy_alive') and not (has_note or lost)) or starting:
         v.update(mode='starting', steps=(STEP_LABELS, 1), ring=dict(kind='work', frac=0.28, icon='power', big='', small=''), headline='Turning on...', sub='This takes a few seconds.',
                  primary=('turn_on', 'Turning on...', 'power'), busy=True)
-        return v
+        return task_status(v, extra)
     if 'after' in ms and st['summary'] and not lost:
         v.update(mode='finished', steps=(STEP_LABELS, 4), ring=dict(kind='ok', frac=1.0, icon='check', big='', small=''), headline='All done. Nice session.', sub=summary_text(st['summary']),
                  primary=('done', 'Done', 'check'), secondary=[('open_report', 'See the full report'), ('abtest', 'Compare before / after')], footer=('ok', 'Session finished'), cards=[])
-        return v
+        return task_status(v, extra)
     a = alert if (has_note or lost) else pre
     if a:
         v.update(mode='problem', ring=dict(kind='warn', frac=0.0, icon='alert', big='', small=''), headline=HEADLINES.get(a['id'], a['title']), alert=a, steps=None, cards=[],
                  footer=('warn', 'Needs your attention  -  nothing was changed'))
-        return v
+        return task_status(v, extra)
     v.update(mode='ready', steps=(STEP_LABELS, 1), ring=dict(kind='off', frac=0.0, icon='power', big='', small=''), headline='Ready when you are',
              sub='Turn on HD textures, then start your game as usual. You can turn it off any time.', primary=('turn_on', 'Turn on HD textures', 'power'))
     if busy: v['primary'] = ('turn_on', 'Turn on HD textures', 'power'); v['busy'] = True
-    return v
+    return task_status(v, extra)
 
 
 def strings(v):

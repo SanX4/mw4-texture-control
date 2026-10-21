@@ -364,7 +364,7 @@ def coach(state, f, last=''):
         card('no_traffic', 'The game is running but nothing reached the helper', 'Most often the game was started before the session. Close it and launch it again. '
              'Otherwise a VPN, "secure DNS" or security software may be bypassing the hosts file. The Doctor tests exactly that.', [('doctor', 'Open the Doctor')])
     if f.get('free_gib') is not None and f['free_gib'] < 5 and (live or f.get('game_running')):
-        card('disk_low', 'Very little disk space left', f"Only {f['free_gib']:.1f} GiB free. The game cache grows while you play, and the disk guard will stop the game at its limit. Free some space on the drive.", [])
+        card('disk_low', 'Very little disk space left', f"Only {f['free_gib']:.1f} GiB free. The game cache grows while you play, and disk protection can pause new transfers at its limit. Free some space on the drive.", [])
     if last and not any(c['id'] in ('hosts_lost',) for c in cards):
         if _has(low, 'denied', 'errno 13', 'winerror 5', 'not permitted'):
             card('hosts_denied', 'Windows refused to change the hosts file', 'Press the button and answer Yes on the Windows prompt. If it is refused again, security software with hosts-file protection is the usual cause: '

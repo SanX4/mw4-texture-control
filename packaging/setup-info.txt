@@ -10,7 +10,7 @@ What it does NOT do
 
 What the program does afterwards
 
-  - It asks Windows for administrator permission each time it starts, because it edits the protected hosts file and the game folder.
+  - The window runs normally. Protected hosts changes and game-folder setup request administrator permission through a helper.
   - It changes the hosts file only when you press "Turn on HD textures", with a backup first. "Turn off" or "Restore hosts" puts it back.
 
 Your settings, logs and reports are kept in "%LOCALAPPDATA%\MW4TextureControl", separate from the program, so updating or reinstalling never loses them.

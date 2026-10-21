@@ -119,3 +119,26 @@ def ensure_dirs():
 
 
 reload()
+
+
+def helper_context_args():
+    """Absolute locations survive ShellExecute/UAC even when its environment does not."""
+    return ['--work-dir', os.path.abspath(WORK), '--hosts-file', os.path.abspath(hosts_path()),
+            '--player-config', os.path.abspath(PLAYER_CFG)]
+
+
+def add_context_arguments(parser):
+    for flag in ('--work-dir', '--hosts-file', '--player-config'):
+        parser.add_argument(flag)
+
+
+def apply_helper_context(args):
+    global WORK, RUN, HOSTS_BACKUPS, SESSIONS, SETTINGS_FILE
+    if args.work_dir:
+        WORK = os.path.abspath(args.work_dir)
+        RUN = os.path.join(WORK, 'run'); HOSTS_BACKUPS = os.path.join(WORK, 'hosts-backups')
+        SESSIONS = os.path.join(WORK, 'sessions'); SETTINGS_FILE = os.path.join(WORK, 'gui_settings.json')
+        os.environ['CCS_WORK'] = WORK
+    if args.hosts_file: os.environ['CCS_HOSTS_PATH'] = os.path.abspath(args.hosts_file)
+    if args.player_config: os.environ['CCS_PLAYER_CFG'] = os.path.abspath(args.player_config)
+    reload()

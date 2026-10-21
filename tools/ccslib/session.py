@@ -4,7 +4,7 @@ start(): hosts override -> proxy (wait for READY) -> diskguard -> optional netwa
 stop():  diskguard + proxy (+ hosts per policy)
 `say(msg)` is a callback for progress lines. Hosts writes go through tools/ccshosts.py elevated via UAC.
 """
-import json, os, subprocess, sys, time
+import json, os, shutil, socket, subprocess, sys, time, uuid
 from . import config, doctor, hosts, launch, logrot, paths, procs, proxyctl, upstream
 
 SESSION_FILE = lambda: os.path.join(paths.RUN, 'session.json')
@@ -12,11 +12,11 @@ SESSION_FILE = lambda: os.path.join(paths.RUN, 'session.json')
 
 def hosts_cmd(cmd, say=print, extra=()):
     """Run ccshosts.py <cmd> elevated (UAC unless already admin). -> (ok, result dict)"""
-    paths.ensure_dirs(); rf = os.path.join(paths.RUN, 'hosts-result.json')
+    paths.ensure_dirs(); rf = os.path.join(paths.RUN, 'hosts-result-' + uuid.uuid4().hex + '.json')
     try: os.remove(rf)
     except OSError: pass
     say(f'hosts: {cmd} (UAC prompt may appear)')
-    code = procs.run_elevated(launch.argv_for('ccshosts', cmd, *extra, '--result-file', rf))
+    code = procs.run_elevated(launch.argv_for('ccshosts', cmd, *extra, '--result-file', rf, *paths.helper_context_args()))
     if code is None: return False, dict(error='UAC declined')
     try: res = json.load(open(rf, encoding='utf-8'))
     except Exception: return False, dict(error=f'no result from elevated helper (exit {code})')
@@ -33,7 +33,7 @@ def _wait_proxy_ready(port, say, timeout=90):
     return False, f'proxy not ready after {timeout}s'
 
 
-def start(cfg, say=print):
+def _start(cfg, say, attempt):
     """-> (ok, summary). Stops at the first hard failure; everything started so far stays up (Stop session cleans up)."""
     paths.ensure_dirs(); paths.reload(); eff = config.effective(cfg); port = eff['proxy']['port']
     bad = [r for r in paths.validate() if r['level'] == 'fail']
@@ -47,6 +47,7 @@ def start(cfg, say=print):
         if st == 'OK' and not rc['ok']: say(f"hosts: block present but resolver returns v4={rc['v4']} v6={rc['v6']} - flushing DNS")
         ok, res = hosts_cmd('apply', say)
         if not ok: return False, f"hosts override not applied: {res.get('error')}"
+        if res.get('changed'): attempt['hosts'] = res
         say(f"hosts: {res.get('state')} (backup {res.get('backup')})")
     else:
         say('hosts: override already present')
@@ -69,27 +70,77 @@ def start(cfg, say=print):
             except Exception as e: say(f'cache baseline skipped: {e}')
         else: say('game is running - cache baseline skipped (report will have no re-request rate)')
         say('proxy: starting ' + ' '.join(os.path.basename(x) if i < 2 else x for i, x in enumerate(proxyctl.proxy_argv(cfg))))
-        proxyctl.start_proxy(cfg)
+        attempt['started'].add('proxy'); proxyctl.start_proxy(cfg)
     ok, msg = _wait_proxy_ready(port, say)
     if not ok: return False, msg
     say('proxy: READY')
     if eff['guard']['enabled']:
         if procs.status('guard')['alive']: say('diskguard: already running')
-        else: proxyctl.start_guard(cfg); say(f"diskguard: started (limit {eff['guard']['limit_gib']:g} GiB, action {eff['guard']['action']}, cache {paths.XPAK_CACHE})")
+        else: attempt['started'].add('guard'); proxyctl.start_guard(cfg); say(f"diskguard: started (limit {eff['guard']['limit_gib']:g} GiB, action {eff['guard']['action']}, cache {paths.XPAK_CACHE})")
     if eff['watchers'].get('netwatch') and not procs.status('netwatch')['alive']:
-        procs.start('netwatch', launch.argv_for('netwatch', 7200), os.path.join(paths.RUN, 'netwatch.out')); say('netwatch: started')
+        attempt['started'].add('netwatch'); procs.start('netwatch', launch.argv_for('netwatch', 7200), os.path.join(paths.RUN, 'netwatch.out')); say('netwatch: started')
     json.dump(dict(started=time.time(), profile=cfg.get('profile'), argv=proxyctl.proxy_argv(cfg)), open(SESSION_FILE(), 'w', encoding='utf-8'))
     res = doctor.run_all(cfg); say(doctor.format_results(res))
     bad = [r for r in res if r['level'] == 'fail']
     return (not bad), ('session running' if not bad else f"{len(bad)} check(s) failed: " + ', '.join(r['name'] for r in bad))
 
 
-def stop(cfg, say=print):
+def start(cfg, say=print):
+    """Preflight first; recover only changes and helpers owned by this attempt."""
+    paths.ensure_dirs(); paths.reload(); eff = config.effective(cfg); port = eff['proxy']['port']
+    bad = [r for r in paths.validate() if r['level'] == 'fail']
+    if bad: return False, 'setup needed - ' + '; '.join(r['detail'] for r in bad)
+    if shutil.disk_usage(paths.GAME_ROOT).free < 2 * 2**30:
+        return False, 'Not enough free disk space: free at least 2 GiB before starting.'
+    if not procs.status('proxy')['alive']:
+        owners = procs.port_owner(port)
+        if owners: return False, f'port {port} already in use by ' + ', '.join(o['name'] for o in owners)
+        sockets = []
+        try:
+            for family, address in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+                sock = socket.socket(family, socket.SOCK_STREAM); sockets.append(sock)
+                if family == socket.AF_INET6: sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'): sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                sock.bind((address, port))
+        except OSError as e: return False, f'port {port} cannot be opened: {e}'
+        finally:
+            for sock in sockets: sock.close()
+    attempt = dict(started=set(), hosts=None)
+    previous = None
+    try:
+        with open(SESSION_FILE(), 'rb') as f: previous = f.read()
+    except OSError: pass
+    try: ok, message = _start(cfg, say, attempt)
+    except Exception as e: ok, message = False, f'Startup failed: {e}'
+    if ok: return True, message
+    recovery = []
+    for name in ('netwatch', 'guard', 'proxy'):
+        if name in attempt['started'] and procs.status(name)['alive'] and not procs.stop(name):
+            recovery.append(f'{name} could not be stopped')
+    change = attempt['hosts']
+    if change:
+        try:
+            restored, result = hosts_cmd('rollback', say, (change['backup'], '--expected-sha256', change['applied_sha256']))
+            if not restored: recovery.append(result.get('error', 'hosts recovery failed'))
+        except Exception as e: recovery.append(str(e))
+    try:
+        if previous is not None:
+            with open(SESSION_FILE(), 'wb') as f: f.write(previous)
+        elif os.path.exists(SESSION_FILE()): os.remove(SESSION_FILE())
+    except OSError as e: recovery.append(f'session record: {e}')
+    suffix = ' Recovery needs attention: ' + '; '.join(recovery) if recovery else ' Startup changes were undone.'
+    say(message + suffix)
+    return False, message + suffix
+
+
+def stop(cfg, say=print, everything=False):
     """Stop tools. Returns dict(hosts_active=bool) so the caller can apply the on_exit policy (ask / keep / remove)."""
-    for n in ('netwatch', 'guard', 'proxy'):
+    names = ('netwatch', 'guard', 'proxy', 'mirror', 'mirror-verify', 'mirror-init', 'mirror-prune') if everything else ('netwatch', 'guard', 'proxy')
+    for n in names:
         if procs.stop(n): say(f'{n}: stopped')
     try: os.remove(SESSION_FILE())
     except OSError: pass
+    if not everything and procs.status('mirror')['alive']: say('Offline downloads are still running. Use Pause downloads or Stop everything to stop them.')
     active = hosts.status()['state'] != 'ABSENT'
     return dict(hosts_active=active)
 

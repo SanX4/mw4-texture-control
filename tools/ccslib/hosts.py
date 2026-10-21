@@ -10,7 +10,7 @@ Rules: never touch other lines (except adopting our own hand-added loopback line
 timestamped backup before every write; in-place write (keeps the file's ACL) with read-back verify + rollback;
 refuse to replace a foreign mapping of HOST to a non-loopback address unless force=True.
 """
-import difflib, glob, os, re, shutil, socket, stat, subprocess, time
+import hashlib, difflib, glob, os, re, shutil, socket, stat, subprocess, time
 from . import paths
 
 BEGIN = '# >>> ccs-managed (MW4 texture CDN loopback) >>>'
@@ -168,7 +168,7 @@ def apply(path=None, force=False, flush=True):
         return dict(changed=False, backup=None)
     bk = write(new, p)
     if flush: flush_dns()
-    return dict(changed=True, backup=bk)
+    return dict(changed=True, backup=bk, applied_sha256=hashlib.sha256(open(p, 'rb').read()).hexdigest())
 
 
 def remove(path=None, flush=True):
@@ -205,3 +205,26 @@ def resolve_check(timeout=3.0):
         except Exception as e: res[key] = [f'ERR {e}']
     res['ok'] = res['v4'] == ['127.0.0.1'] and res['v6'] == ['::1']
     return res
+
+
+def rollback_attempt(name, expected_sha256, flush=True):
+    """Restore this attempt's exact bytes only if nobody has edited hosts since apply."""
+    src = os.path.realpath(name or '')
+    if os.path.dirname(src) != os.path.realpath(paths.HOSTS_BACKUPS):
+        raise HostsError('rollback backup is outside the hosts backup folder')
+    if not expected_sha256: raise HostsError('rollback needs the applied file hash')
+    with open(src, 'rb') as f: prior = f.read()
+    p = paths.hosts_path()
+    with open(p, 'r+b') as f:
+        current = f.read()
+        if hashlib.sha256(current).hexdigest() != expected_sha256:
+            raise HostsError('hosts changed since startup; automatic recovery refused to overwrite those edits. Use Restore hosts.')
+        backup(p, tag='-before-recovery')
+        try:
+            f.seek(0); f.write(prior); f.truncate(); f.flush()
+            f.seek(0)
+            if f.read() != prior: raise HostsError('recovery read-back mismatch')
+        except Exception:
+            f.seek(0); f.write(current); f.truncate(); raise
+    if flush: flush_dns()
+    return dict(changed=True, restored=src)
